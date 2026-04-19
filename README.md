@@ -27,3 +27,15 @@ Wrappers around environments that will take care of providing representations fr
     url     = {https://arxiv.org/abs/2312.10812},
 }
 ```
+
+```bibtex
+@misc{eysenbach2023contrastivelearninggoalconditionedreinforcement,
+    title   = {Contrastive Learning as Goal-Conditioned Reinforcement Learning},
+    author  = {Benjamin Eysenbach and Tianjun Zhang and Ruslan Salakhutdinov and Sergey Levine},
+    year    = {2023},
+    eprint  = {2206.07568},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2206.07568},
+}
+```
