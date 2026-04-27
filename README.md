@@ -51,3 +51,13 @@ Wrappers around environments that will take care of providing representations fr
     url     = {https://arxiv.org/abs/2506.07085}, 
 }
 ```
+
+```bibtex
+@inproceedings{park2026dual,
+    title   = {Dual Goal Representations},
+    author  = {Seohong Park and Deepinder Mann and Sergey Levine},
+    booktitle = {The Fourteenth International Conference on Learning Representations},
+    year    = {2026},
+    url     = {https://openreview.net/forum?id=aMKFTidLSM}
+}
+```
