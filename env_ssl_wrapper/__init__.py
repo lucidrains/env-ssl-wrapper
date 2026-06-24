@@ -1,1 +1,1 @@
-
+from .image_wrapper import ImageObservationWrapper
