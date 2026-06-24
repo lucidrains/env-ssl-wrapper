@@ -67,7 +67,7 @@ class TensorWrapper:
     def step(self, action):
         action = torch_to_numpy(action, self.cast_float64_to_float32) if self.convert_in else action
         out = self.env.step(action)
-        
+
         if not self.convert_out:
             return out
 

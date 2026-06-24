@@ -15,7 +15,7 @@ def test_image_wrapper(normalize):
     env = ImageObservationWrapper(env, image_size = (32, 32), normalize = normalize)
 
     obs, info = env.reset()
-    
+
     assert isinstance(obs, dict)
     assert 'state' in obs
     assert 'image' in obs

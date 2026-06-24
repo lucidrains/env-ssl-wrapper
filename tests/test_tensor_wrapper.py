@@ -11,14 +11,14 @@ def test_tensor_wrapper():
     env = gym.make('CartPole-v1')
     device = 'cpu'
     env = TensorWrapper(env, device = device)
-    
+
     obs, info = env.reset()
-    
+
     assert is_tensor(obs)
-    
+
     action = torch.tensor(env.action_space.sample())
     next_obs, reward, terminated, truncated, info = env.step(action)
-    
+
     assert is_tensor(next_obs)
     assert is_tensor(reward)
     assert is_tensor(terminated)

@@ -11,18 +11,31 @@ WRAPPERS = dict(
     tensor = TensorWrapper
 )
 
+def is_unique(arr):
+    return len(set(arr)) == len(arr)
+
 def compose_env(env, *wrappers):
+    funcs = []
+    classes = []
+
     for wrapper in wrappers:
         if isinstance(wrapper, str):
             wrapper = WRAPPERS[wrapper]
 
         if isinstance(wrapper, tuple):
-            name_or_fn, kwargs = wrapper
-            fn = WRAPPERS.get(name_or_fn, name_or_fn)
-            wrapper = partial(fn, **kwargs)
-            
-        env = wrapper(env)
-        
+            name, kwargs = wrapper
+            wrapper = partial(WRAPPERS.get(name, name), **kwargs)
+
+        cls = wrapper.func if isinstance(wrapper, partial) else wrapper
+
+        funcs.append(wrapper)
+        classes.append(cls)
+
+    assert is_unique(classes), 'duplicate wrappers found'
+
+    for func in funcs:
+        env = func(env)
+
     return env
 
 # alias

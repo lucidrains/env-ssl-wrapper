@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn, is_tensor
 import gymnasium as gym
@@ -21,7 +22,7 @@ class SimpleConvNet(nn.Module):
             nn.ReLU(),
             nn.Linear(128, num_actions)
         )
-        
+
     def forward(self, obs_dict):
         img = obs_dict['image']
         logits = self.net(img)
@@ -42,7 +43,7 @@ def test_wrappers_with_cartpole():
     policy = SimpleConvNet(env.action_space.n).to(device)
 
     obs, info = env.reset()
-    
+
     assert 'image' in obs
     assert is_tensor(obs['image'])
     assert obs['image'].ndim == 4
@@ -50,17 +51,27 @@ def test_wrappers_with_cartpole():
 
     for _ in range(5):
         action = policy(obs)
-        
+
         assert is_tensor(action)
         assert action.ndim == 1
         assert action.shape[0] == 1
 
         next_obs, reward, terminated, truncated, info = env.step(action)
-        
+
         assert is_tensor(reward)
         assert reward.ndim == 1
-        
+
         obs = next_obs
-        
+
         if terminated.item() or truncated.item():
             obs, info = env.reset()
+
+def test_duplicate_wrappers_error():
+    env = gym.make('CartPole-v1', render_mode = 'rgb_array')
+
+    with pytest.raises(AssertionError, match='duplicate wrappers found'):
+        compose_env(
+            env,
+            'auto_batch',
+            'auto_batch'
+        )

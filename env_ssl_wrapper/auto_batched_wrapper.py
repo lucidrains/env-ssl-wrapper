@@ -51,8 +51,8 @@ class AutoBatchedWrapper:
     def step(self, action):
         action = maybe_squeeze_dim(action) if not self.is_vector else action
         out = self.env.step(action)
-        
+
         if self.is_vector:
             return out
-            
+
         return *maybe_expand_dim(out[:4]), out[4]
