@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import numpy as np
 
-import gymnasium as gym
 from PIL import Image
 from einops import rearrange
 
@@ -14,7 +13,7 @@ def cast_tuple(t, length = 1):
 
 # class
 
-class ImageObservationWrapper(gym.ObservationWrapper):
+class ImageObservationWrapper:
     def __init__(
         self,
         env,
@@ -24,12 +23,17 @@ class ImageObservationWrapper(gym.ObservationWrapper):
         normalize = True,
         normalize_divisor = 255.0
     ):
-        super().__init__(env)
+        self.env = env
         self.image_size = cast_tuple(image_size, 2)
         self.image_key = image_key
         self.resample_method = resample_method
         self.normalize = normalize
         self.normalize_divisor = normalize_divisor
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(f"attempted to get missing private attribute '{name}'")
+        return getattr(self.env, name)
 
     def render_frame(self):
         img = self.env.render()
@@ -56,3 +60,11 @@ class ImageObservationWrapper(gym.ObservationWrapper):
         obs.update({self.image_key: img_tensor})
 
         return obs
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self.observation(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self.observation(obs), reward, terminated, truncated, info
