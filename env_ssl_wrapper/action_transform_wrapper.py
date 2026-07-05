@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
+from functools import partial
 
 # helpers
 
@@ -12,6 +13,27 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def is_float_dtype(t):
+    if is_tensor(t):
+        return t.is_floating_point()
+    if isinstance(t, np.ndarray):
+        return np.issubdtype(t.dtype, np.floating)
+    return isinstance(t, float)
+
+def copy(t):
+    if is_tensor(t):
+        return t.clone()
+    if isinstance(t, np.ndarray):
+        return np.copy(t)
+    return t
+
+def clamp(t, min_val, max_val):
+    if is_tensor(t):
+        return torch.clamp(t, min_val, max_val)
+    if isinstance(t, np.ndarray):
+        return np.clip(t, min_val, max_val)
+    return max(min_val, min(t, max_val))
 
 def rescale(
     t,
@@ -22,7 +44,7 @@ def rescale(
     to_min, to_max = to_range
     return (t - from_min) / (from_max - from_min) * (to_max - to_min) + to_min
 
-# classes
+# wrapper
 
 class ActionTransformWrapper:
     def __init__(
@@ -32,12 +54,12 @@ class ActionTransformWrapper:
         clip = None
     ):
         self.env = env
+        self.clip = clip
 
         if isinstance(transforms, dict):
             transforms = [transforms]
 
         self.transforms = default(transforms, [])
-        self.clip = clip
 
     def __getattr__(self, name):
         if name.startswith('_'):
@@ -49,45 +71,29 @@ class ActionTransformWrapper:
 
     def step(self, action):
         def transform_action(t):
-            is_torch_float = is_tensor(t) and t.is_floating_point()
-            is_np_float = isinstance(t, np.ndarray) and np.issubdtype(t.dtype, np.floating)
-            is_scalar_float = isinstance(t, float)
-
-            if not (is_torch_float or is_np_float or is_scalar_float):
+            if not is_float_dtype(t):
                 return t
 
-            if is_tensor(t):
-                t = t.clone()
-            elif isinstance(t, np.ndarray):
-                t = np.copy(t)
+            t = copy(t)
 
             for ind, transform in enumerate(self.transforms):
-                indices = transform.get('indices')
-                rescale_from_to = transform.get('rescale_from_to')
+                indices = transform.get('indices', ind if len(self.transforms) > 1 else None)
 
-                if not exists(indices) and len(self.transforms) > 1:
-                    indices = ind
+                if 'rescale_from_to' not in transform:
+                    continue
 
-                if exists(rescale_from_to):
-                    from_range, to_range = rescale_from_to
+                from_range, to_range = transform['rescale_from_to']
+                fn = partial(rescale, from_range = from_range, to_range = to_range)
 
-                    if not exists(indices):
-                        t = rescale(t, from_range, to_range)
-                    else:
-                        part = t[..., indices]
-                        t[..., indices] = rescale(part, from_range, to_range)
+                if exists(indices):
+                    t[..., indices] = fn(t[..., indices])
+                else:
+                    t = fn(t)
 
             if exists(self.clip):
-                min_clip, max_clip = self.clip
-
-                if is_tensor(t):
-                    t = torch.clamp(t, min_clip, max_clip)
-                elif isinstance(t, np.ndarray):
-                    t = np.clip(t, min_clip, max_clip)
-                else:
-                    t = max(min_clip, min(t, max_clip))
+                t = clamp(t, *self.clip)
 
             return t
 
-        action = tree_map(transform_action, action)
-        return self.env.step(action)
+        transformed_action = tree_map(transform_action, action)
+        return self.env.step(transformed_action)
