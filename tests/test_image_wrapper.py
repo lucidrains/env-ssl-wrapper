@@ -10,9 +10,10 @@ from env_ssl_wrapper import ImageObservationWrapper
 # tests
 
 @pytest.mark.parametrize('normalize', (True, False))
-def test_image_wrapper(normalize):
+@pytest.mark.parametrize('mode', ('area', 'bilinear'))
+def test_image_wrapper(normalize, mode):
     env = gym.make('CartPole-v1', render_mode = 'rgb_array')
-    env = ImageObservationWrapper(env, image_size = (32, 32), normalize = normalize)
+    env = ImageObservationWrapper(env, image_size = (32, 32), mode = mode, normalize = normalize)
 
     obs, info = env.reset()
 

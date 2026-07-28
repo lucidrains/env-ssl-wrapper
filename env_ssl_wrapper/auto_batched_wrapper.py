@@ -7,9 +7,25 @@ from einops import rearrange
 
 # helper functions
 
+def exists(v):
+    return v is not None
+
+def default(v, d):
+    return v if exists(v) else d
+
 def is_vectorized(env) -> bool:
+    if getattr(env, 'is_vector', False):
+        return True
+
+    curr = env
+    while exists(curr):
+        if isinstance(curr, AutoBatchedWrapper):
+            return True
+        curr = getattr(curr, 'env', None)
+
     if hasattr(env, 'num_envs') and getattr(env, 'num_envs', 0) > 0:
         return True
+
     try:
         from gymnasium.vector import VectorEnv
         return isinstance(getattr(env, 'unwrapped', env), VectorEnv)
@@ -37,7 +53,7 @@ def maybe_squeeze_dim(x):
 class AutoBatchedWrapper:
     def __init__(self, env, is_vector: bool | None = None):
         self.env = env
-        self.is_vector = is_vector if is_vector is not None else is_vectorized(env)
+        self.is_vector = default(is_vector, is_vectorized(env))
 
     def __getattr__(self, name):
         if name.startswith('_'):

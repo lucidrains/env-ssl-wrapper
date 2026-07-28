@@ -5,12 +5,15 @@ from .image_wrapper import ImageObservationWrapper
 from .auto_batched_wrapper import AutoBatchedWrapper
 from .tensor_wrapper import TensorWrapper
 from .action_transform_wrapper import ActionTransformWrapper
+from .done_tracker_wrapper import DoneTrackerWrapper
 
 WRAPPERS = dict(
     image = ImageObservationWrapper,
     auto_batch = AutoBatchedWrapper,
     tensor = TensorWrapper,
-    action_transform = ActionTransformWrapper
+    action_transform = ActionTransformWrapper,
+    done_tracker = DoneTrackerWrapper,
+    done = DoneTrackerWrapper
 )
 
 def is_unique(arr):
