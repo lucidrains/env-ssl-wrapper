@@ -73,6 +73,9 @@ class DoneTrackerWrapper:
         self.episode_lengths = np.zeros(self.num_envs, dtype = int)
         self.has_reset = True
 
+        if isinstance(info, dict):
+            info['episode_lengths'] = self.episode_lengths.copy()
+
         return obs, info
 
     def step(self, action):
@@ -88,7 +91,10 @@ class DoneTrackerWrapper:
         self.episode_lengths[active_before] += 1
         self.is_done |= dones_np
 
-        if isinstance(info, dict) and self.all_done:
-            info.update(needs_reset = True, all_done = True)
+        if isinstance(info, dict):
+            info['episode_lengths'] = self.episode_lengths.copy()
+
+            if self.all_done:
+                info.update(needs_reset = True, all_done = True)
 
         return obs, reward, terminated, truncated, info

@@ -1,7 +1,7 @@
 [project]
 name = "env-ssl-wrapper"
-version = "0.0.6"
-description = "An RL environment wrapper for learning SSL in the background"
+version = "0.1.0"
+description = "One torch-native interface for any MDP environment"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
 ]
@@ -41,7 +41,14 @@ Repository = "https://codeberg.org/lucidrains/env-ssl-wrapper"
 [project.optional-dependencies]
 examples = []
 test = [
-    "pytest"
+    "pytest",
+    "gymnasium>=0.29.1",
+    "mujoco",
+    "dm-control",
+    "pygame",
+    "pillow",
+    "imageio",
+    "populora",
 ]
 
 [tool.pytest.ini_options]

@@ -3,6 +3,7 @@ import numpy as np
 import torch
 
 from env_ssl_wrapper.action_transform_wrapper import ActionTransformWrapper
+from env_ssl_wrapper.mocks import GymnasiumMockEnv, GymnasiumDiscreteMockEnv, DMControlMockEnv, Space
 
 class MockEnv:
     def step(self, action):
@@ -50,3 +51,52 @@ def test_action_transform_wrapper():
     wrapper_implicit.step(np.array([0., 1.], dtype=np.float32))
 
     assert np.allclose(env.last_action, np.array([-1., 2.]))
+
+# auto rescale — policy emits in canonical (0, 1) (beta-friendly),
+# wrapper maps to any env's action bounds, leaving unbounded dims untouched
+
+class BoundedMockEnv(GymnasiumMockEnv):
+    def __init__(self, low, high):
+        super().__init__()
+        self.low = np.asarray(low, dtype = float)
+        self.high = np.asarray(high, dtype = float)
+
+    @property
+    def action_space(self):
+        return Space((self.action_dim,), self.low, self.high)
+
+def test_auto_rescale_uniform_bounds():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True)
+    env.step(np.array([0.25, 1.0], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([-1.0, 2.0]))
+
+def test_auto_rescale_per_dim_bounds():
+    env = ActionTransformWrapper(BoundedMockEnv([-2., 0.], [0., 4.]), auto = True)
+    env.step(np.array([0.5, 0.5], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([-1.0, 2.0]))
+
+def test_auto_rescale_unbounded_dims_passthrough():
+    env = ActionTransformWrapper(BoundedMockEnv([-np.inf, -2.], [np.inf, 2.]), auto = True)
+    env.step(np.array([0.5, 0.5], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([0.5, 0.0]))
+
+def test_auto_rescale_torch():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True)
+    env.step(torch.tensor([0.25, 1.0]))
+
+    assert torch.allclose(torch.from_numpy(env.unwrapped.last_action), torch.tensor([-1.0, 2.0]))
+
+def test_auto_rescale_discrete_passthrough():
+    env = ActionTransformWrapper(GymnasiumDiscreteMockEnv(), auto = True)
+    env.step(np.int64(1))
+
+    assert env.unwrapped.last_action == 1
+
+def test_auto_rescale_dm_control_action_spec():
+    env = ActionTransformWrapper(DMControlMockEnv(), auto = True)
+    env.step(np.array([0.0, 1.0], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([-1.0, 1.0]))

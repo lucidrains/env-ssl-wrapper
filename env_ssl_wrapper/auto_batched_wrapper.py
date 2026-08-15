@@ -17,18 +17,26 @@ def is_vectorized(env) -> bool:
     if getattr(env, 'is_vector', False):
         return True
 
+    if getattr(env, 'num_envs', 0) > 1:
+        return True
+
+    # maniskill — gymnasium-compliant but always batched, even at num_envs = 1;
+    # exposes single_action_space like a vector env, and returns batched tensors
+
+    if getattr(env, 'single_action_space', None) is not None:
+        return True
+
     curr = env
     while exists(curr):
         if isinstance(curr, AutoBatchedWrapper):
             return True
+        if getattr(curr, 'is_vector', False):
+            return True
         curr = getattr(curr, 'env', None)
-
-    if hasattr(env, 'num_envs') and getattr(env, 'num_envs', 0) > 0:
-        return True
 
     try:
         from gymnasium.vector import VectorEnv
-        return isinstance(getattr(env, 'unwrapped', env), VectorEnv)
+        return isinstance(env, VectorEnv)
     except ImportError:
         return False
 
@@ -44,7 +52,15 @@ def maybe_expand_dim(x):
 def maybe_squeeze_dim(x):
     def _squeeze(t):
         if isinstance(t, np.ndarray) or is_tensor(t):
-            return rearrange(t, '1 ... -> ...')
+            if t.ndim == 0:
+                return t
+
+            t = rearrange(t, '1 ... -> ...')
+
+            if isinstance(t, np.ndarray) and t.ndim == 0:
+                return t.item()
+
+            return t
         return t
     return tree_map(_squeeze, x)
 
