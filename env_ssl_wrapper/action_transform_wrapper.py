@@ -106,6 +106,13 @@ class ActionTransformWrapper:
 
         low, high = self.bounds
 
+        # scalar (0-dim) actions — e.g. Box(shape = (), ...) — are reshaped out and back
+
+        was_scalar = t.ndim == 0
+
+        if was_scalar:
+            t = t.reshape(1)
+
         dim = t.shape[-1]
         low = np.broadcast_to(low, (dim,))
         high = np.broadcast_to(high, (dim,))
@@ -114,19 +121,24 @@ class ActionTransformWrapper:
 
         if is_tensor(t):
             device, dtype = t.device, t.dtype
-            low = torch.from_numpy(low).to(device, dtype)
-            high = torch.from_numpy(high).to(device, dtype)
-            valid = torch.from_numpy(valid).to(device)
+            low = torch.tensor(low, dtype = dtype, device = device)
+            high = torch.tensor(high, dtype = dtype, device = device)
+            valid = torch.tensor(valid, device = device)
 
             rescaled = rescale(t, self.from_range, (low, high))
             rescaled = torch.clamp(rescaled, low, high)
 
-            return torch.where(valid, rescaled, t)
+            rescaled = torch.where(valid, rescaled, t)
+        else:
+            rescaled = rescale(t, self.from_range, (low, high))
+            rescaled = np.clip(rescaled, low, high)
 
-        rescaled = rescale(t, self.from_range, (low, high))
-        rescaled = np.clip(rescaled, low, high)
+            rescaled = np.where(valid, rescaled, t)
 
-        return np.where(valid, rescaled, t)
+        if was_scalar:
+            rescaled = rescaled.reshape(())
+
+        return rescaled
 
     def step(self, action):
         def transform_action(t):

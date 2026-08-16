@@ -418,3 +418,48 @@ def test_time_limit_timer_resets_across_episodes():
 
     assert saw_truncated
     assert env.episode_lengths[0] == 5
+
+# action transform — scalar (0-dim) float actions flow through auto rescaling,
+# for Box(shape = (), ...) scalar action spaces
+
+class ScalarActionSpaceEnv:
+    def reset(self, **kwargs):
+        return np.zeros(2), {}
+
+    def step(self, action):
+        self.last_action = action
+        return np.zeros(2), 1.0, False, False, {}
+
+def test_auto_rescale_scalar_action():
+    env = ScalarActionSpaceEnv()
+    env.action_space = type('ScalarBox', (), dict(low = np.array(-2.), high = np.array(2.)))()
+
+    env = ActionTransformWrapper(env, auto = True)
+
+    env.reset()
+    env.step(torch.tensor(0.5))
+    assert env.last_action.shape == ()
+    assert env.last_action == 0.0
+
+    env.reset()
+    env.step(np.array(1.0))
+    assert env.last_action.shape == ()
+    assert env.last_action == 2.0
+
+# standardize — legacy sims returning 0/1 integer dones must not surface a
+# phantom truncated flag alongside termination
+
+class IntDoneEnv:
+    def reset(self):
+        return np.zeros(2), {}
+
+    def step(self, action):
+        return np.zeros(2), 1.0, 1
+
+def test_int_done_not_truncated():
+    env = StandardizeWrapper(IntDoneEnv())
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros(2))
+    assert terminated
+    assert not truncated

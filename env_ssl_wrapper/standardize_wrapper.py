@@ -20,9 +20,7 @@ def zero_like(x):
         return torch.zeros_like(x, dtype = torch.bool)
     if isinstance(x, np.ndarray):
         return np.zeros_like(x, dtype = bool)
-    if isinstance(x, (bool, np.bool_)):
-        return False
-    return x
+    return False
 
 def any_true(x):
     if is_tensor(x):
