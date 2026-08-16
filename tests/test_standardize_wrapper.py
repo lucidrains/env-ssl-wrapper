@@ -94,6 +94,26 @@ def test_isaac_4_tuple_vectorized():
         obs, reward, terminated, truncated, info = env.step(torch.randn(4, 2))
         if terminated.any():
             done_reached = True
+            # standardize does not inject final_observation for vector envs —
+            # the post-step obs is unreliable there; EpisodePaddingWrapper owns it
+            assert 'final_observation' not in info
+            break
+
+    assert done_reached
+
+def test_isaac_vector_final_observation_via_padding():
+    from env_ssl_wrapper import compose_env
+
+    # compose auto-inserts standardize (5-tuple) + pad_episodes (vectorized)
+    env = compose_env(IsaacMockEnv())
+
+    obs, info = env.reset()
+
+    done_reached = False
+    for _ in range(100):
+        obs, reward, terminated, truncated, info = env.step(torch.randn(4, 2))
+        if terminated.any():
+            done_reached = True
             assert 'final_observation' in info
             assert info['_final_observation'].dtype == torch.bool
             break

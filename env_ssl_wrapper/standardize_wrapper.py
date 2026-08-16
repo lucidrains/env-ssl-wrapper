@@ -113,8 +113,13 @@ class StandardizeWrapper:
 
         dones = tree_map(lambda a, b: a | b, terminated, truncated)
 
-        if 'final_observation' not in info and any_true(dones):
+        # final_observation is only injected for single envs, where the post-step
+        # obs is the true terminal obs. for vector envs the post-step obs is
+        # unreliable (garbage for non-autoreset sims, fresh post-reset obs for
+        # autoreset sims) — EpisodePaddingWrapper owns it there
+
+        if 'final_observation' not in info and not self.is_vector and any_true(dones):
             info['final_observation'] = obs
-            info['_final_observation'] = dones if self.is_vector else True
+            info['_final_observation'] = True
 
         return obs, reward, terminated, truncated, info

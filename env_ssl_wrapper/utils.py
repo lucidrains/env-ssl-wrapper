@@ -3,10 +3,11 @@ from functools import partial
 
 from .standardize_wrapper import StandardizeWrapper
 from .image_wrapper import ImageObservationWrapper
-from .auto_batched_wrapper import AutoBatchedWrapper
+from .auto_batched_wrapper import AutoBatchedWrapper, is_vectorized
 from .tensor_wrapper import TensorWrapper
 from .action_transform_wrapper import ActionTransformWrapper
 from .done_tracker_wrapper import DoneTrackerWrapper
+from .episode_padding_wrapper import EpisodePaddingWrapper
 from .flatten_obs_wrapper import FlattenObsWrapper
 from .time_limit_wrapper import TimeLimitWrapper
 
@@ -19,7 +20,8 @@ WRAPPERS = dict(
     done_tracker = DoneTrackerWrapper,
     done = DoneTrackerWrapper,
     flatten_obs = FlattenObsWrapper,
-    time_limit = TimeLimitWrapper
+    time_limit = TimeLimitWrapper,
+    pad_episodes = EpisodePaddingWrapper
 )
 
 def is_unique(arr):
@@ -48,6 +50,13 @@ def compose_env(env, *wrappers):
     if StandardizeWrapper not in classes:
         funcs.insert(0, StandardizeWrapper)
         classes.insert(0, StandardizeWrapper)
+
+    # vectorized envs always get standardized episode padding + a persistent
+    # final_observation, so uneven terminations emit zeros/False uniformly
+
+    if EpisodePaddingWrapper not in classes and is_vectorized(env):
+        funcs.append(EpisodePaddingWrapper)
+        classes.append(EpisodePaddingWrapper)
 
     assert is_unique(classes), 'duplicate wrappers found'
 
