@@ -88,14 +88,17 @@ def merge_final(current, value, mask):
 
 class EpisodePaddingWrapper:
     # standardized padding for uneven vectorized episodes: when an env
-    # terminates early, its obs and reward slots are zeroed (floats/ints -> 0,
-    # bool -> False) on the terminating step and every step after, regardless of
-    # whether the env autoresets (Isaac, gymnasium) or keeps stepping (pufferlib,
-    # maniskill). info['final_observation'] is standardized too: the true
-    # terminal obs (env-provided pre-reset obs for autoreset sims, else the
-    # cached pre-step obs — never the env's post-termination garbage) is frozen
-    # per env and re-emitted every step while any env stays done, with
-    # _final_observation masking which envs it applies to.
+    # terminates early, its obs slot is zeroed (floats/ints -> 0, bool -> False)
+    # on the terminating step and every step after, regardless of whether the
+    # env autoresets (Isaac, gymnasium) or keeps stepping (pufferlib, maniskill).
+    # rewards follow the gymnasium convention instead: the terminating step's
+    # reward is the real terminal transition reward and is preserved — only
+    # rewards on steps after termination (frozen env garbage) are zeroed.
+    # info['final_observation'] is standardized too: the true terminal obs
+    # (env-provided pre-reset obs for autoreset sims, else the cached pre-step
+    # obs — never the env's post-termination garbage) is frozen per env and
+    # re-emitted every step while any env stays done, with _final_observation
+    # masking which envs it applies to.
 
     def __init__(self, env):
         self.env = env
@@ -144,7 +147,12 @@ class EpisodePaddingWrapper:
                         self._final_obs = tree_map(lambda a, b: merge_final(a, b, newly), self._final_obs, value)
 
                 obs = tree_map(lambda x: zero_pad(x, mask), obs)
-                reward = zero_reward(reward, mask)
+
+                # zero rewards only for envs that were already done before this
+                # step - the terminating step's own reward is the real terminal
+                # transition reward and must survive for the return calculation
+
+                reward = zero_reward(reward, mask & ~newly)
 
                 info['final_observation'] = self._final_obs
                 info['_final_observation'] = back_to_mask_type(dones, mask)

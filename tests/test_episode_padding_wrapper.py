@@ -49,10 +49,12 @@ def test_pad_non_autoreset_uneven_termination():
         obs, reward, terminated, truncated, info = env.step(np.zeros(4))
 
         if step == 10:
-            # env 0 terminates: its slot is zeroed, others keep real obs
+            # env 0 terminates: its obs slot is zeroed, others keep real obs;
+            # the terminating step's reward is the real terminal reward and is
+            # preserved (only post-termination steps are zeroed)
             assert obs[0] == 0.0
             assert (obs[1:] == 10.0).all()
-            assert reward[0] == 0.0
+            assert reward[0] == 1.0
             assert (reward[1:] == 1.0).all()
             assert terminated[0] and not truncated[0]
             # final_observation = last real (pre-step) obs, not the terminating garbage
@@ -88,9 +90,9 @@ def test_pad_autoreset_strict_zeros():
         if terminated.any():
             done = terminated.numpy() if torch.is_tensor(terminated) else np.asarray(terminated)
 
-            # done slots strictly zeroed despite the fresh post-reset obs
+            # done slots zeroed despite the fresh post-reset obs; the terminating step reward is preserved
             assert (obs[done] == 0.0).all()
-            assert (reward[done] == 0.0).all()
+            assert (reward[done] == 1.0).all()
             # env-provided final_observation (true pre-reset obs) passes through
             assert info['final_observation'][done].any()
             assert info['_final_observation'].dtype == bool
@@ -103,8 +105,26 @@ def test_pad_autoreset_strict_zeros():
     # autoreset envs revive the step after termination — padding only applies
     # while an env stays done (non-autoreset envs, covered above)
 
+# deterministic isaac mocks - same autoreset quirks, known rewards
+
+class DeterministicIsaacLabMockEnv(IsaacLabMockEnv):
+    def step(self, action):
+        self.advance(action)
+        dones = torch.tensor(self.is_done())
+
+        for ind in np.where(dones.numpy())[0]:
+            self.t[ind] = 0
+            self.state[ind] = 0
+
+        return self.obs(), torch.ones(self.num_envs), dones, torch.zeros(self.num_envs, dtype = torch.bool), {}
+
+class DeterministicIsaacMockEnv(IsaacMockEnv):
+    def step(self, action):
+        self.advance(action)
+        return self.obs(), torch.ones(self.num_envs), torch.tensor(self.is_done()), {}
+
 def test_pad_isaac_lab_dict_obs():
-    env = EpisodePaddingWrapper(IsaacLabMockEnv())
+    env = EpisodePaddingWrapper(DeterministicIsaacLabMockEnv())
 
     obs, info = env.reset()
     assert isinstance(obs, dict)
@@ -118,7 +138,7 @@ def test_pad_isaac_lab_dict_obs():
             done_at = terminated
             assert (obs['policy'][terminated] == 0.0).all()
             assert (obs['critic'][terminated] == 0.0).all()
-            assert (reward[terminated] == 0.0).all()
+            assert (reward[terminated] == 1.0).all()
             assert info['final_observation']['policy'][terminated].any()
             assert info['_final_observation'].dtype == torch.bool
             break
@@ -135,7 +155,7 @@ def test_pad_puffer_vector_numpy():
 
         if terminated.any():
             assert (obs[terminated] == 0.0).all()
-            assert (reward[terminated] == 0.0).all()
+            assert (reward[terminated] == 1.0).all()
             assert info['_final_observation'].dtype == bool
             break
 
@@ -149,7 +169,7 @@ def test_pad_maniskill_no_autoreset_no_info():
 
         if terminated.any():
             assert (obs[terminated] == 0.0).all()
-            assert (reward[terminated] == 0.0).all()
+            assert (reward[terminated] == 1.0).all()
             assert 'final_observation' in info
             break
 
@@ -227,7 +247,7 @@ def test_single_env_passthrough():
 
 def test_compose_env_pad_episodes():
     env = compose_env(
-        IsaacMockEnv(),
+        DeterministicIsaacMockEnv(),
         ('tensor', dict(device = 'cpu')),
         'pad_episodes',
         'done_tracker'
@@ -243,7 +263,7 @@ def test_compose_env_pad_episodes():
             assert (obs['state'][terminated] == 0.0).all()
             assert obs['image'][terminated].dtype == torch.float32
             assert (obs['image'][terminated] == 0.0).all()
-            assert (reward[terminated] == 0.0).all()
+            assert (reward[terminated] == 1.0).all()
             assert terminated.dtype == torch.bool
             assert info['_final_observation'].dtype == torch.bool
             break
@@ -266,7 +286,7 @@ def test_gymnasium_vector_autoreset():
         if terminated.any():
             done_at = terminated
             assert (obs[terminated] == 0.0).all()
-            assert (reward[terminated] == 0.0).all()
+            assert (reward[terminated] == 1.0).all()
             assert 'final_observation' in info
             assert info['_final_observation'].dtype == bool
             break
