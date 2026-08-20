@@ -4,50 +4,57 @@ import numpy as np
 import torch
 from torch import is_tensor
 
-def to_numpy(t):
-    if is_tensor(t):
-        return t.detach().cpu().numpy()
-    return np.asarray(t)
+from .helpers import EnvWrapper, to_numpy
+from .standardize_wrapper import normalize_reset_out, normalize_step_out
 
 def back_to_like(t, numpy_arr):
     if is_tensor(t):
         return torch.from_numpy(numpy_arr).to(t.device)
+
     if isinstance(t, np.ndarray):
         return numpy_arr
-    return bool(numpy_arr.item() if numpy_arr.ndim else numpy_arr)
 
-class TimeLimitWrapper:
+    # python scalars (single-env dones) collapse to a scalar; foreign
+    # array-likes (jax) keep the numpy array so the batch dim survives
+
+    if numpy_arr.ndim == 0:
+        return bool(numpy_arr)
+
+    if numpy_arr.size == 1:
+        return bool(numpy_arr.reshape(-1)[0])
+
+    return numpy_arr
+
+class TimeLimitWrapper(EnvWrapper):
     # caps episode length at max_timesteps, setting truncated = True for
     # capped envs (vectorized and single alike); timers reset per episode
 
     def __init__(self, env, max_timesteps):
-        self.env = env
+        super().__init__(env)
         self.max_timesteps = max_timesteps
         self.num_envs = getattr(env, 'num_envs', 1)
         self.t = np.zeros(self.num_envs, dtype = int)
 
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
-
     def reset(self, **kwargs):
         self.t = np.zeros(self.num_envs, dtype = int)
-        return self.env.reset(**kwargs)
+        return normalize_reset_out(self.env.reset(**kwargs))
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
 
         terminated_np = to_numpy(terminated)
         truncated_np = to_numpy(truncated)
 
         self.t += 1
 
-        time_limit = self.t >= self.max_timesteps
-        truncated_np = truncated_np | (time_limit & ~terminated_np)
+        # capped envs are truncated, unless already terminated this step
 
-        dones = terminated_np | truncated_np
-        self.t = np.where(dones, 0, self.t)
+        capped = self.t >= self.max_timesteps
+        truncated_np = truncated_np | (capped & ~terminated_np)
+
+        # timers reset for envs that ended, so the next episode starts fresh
+
+        self.t = np.where(terminated_np | truncated_np, 0, self.t)
 
         truncated = back_to_like(truncated, truncated_np)
 

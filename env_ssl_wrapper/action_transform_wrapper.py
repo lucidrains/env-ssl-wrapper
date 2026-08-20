@@ -6,13 +6,9 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
 
+from .helpers import EnvWrapper, default, exists
+
 # helpers
-
-def exists(v):
-    return v is not None
-
-def default(v, d):
-    return v if exists(v) else d
 
 def is_float_dtype(t):
     if is_tensor(t):
@@ -68,7 +64,7 @@ def action_bounds(env):
 
 # wrapper
 
-class ActionTransformWrapper:
+class ActionTransformWrapper(EnvWrapper):
     def __init__(
         self,
         env,
@@ -77,7 +73,7 @@ class ActionTransformWrapper:
         auto = False,
         from_range = (0.0, 1.0)
     ):
-        self.env = env
+        super().__init__(env)
         self.clip = clip
         self.auto = auto
         self.from_range = from_range
@@ -89,24 +85,19 @@ class ActionTransformWrapper:
 
         self.bounds = action_bounds(env) if auto else None
 
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
-
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
     def auto_transform(self, t):
-        # rescale canonical range (default (0, 1), beta-friendly) to per-env bounds,
-        # leaving unbounded dimensions untouched
+        # rescale canonical range (default (0, 1), beta-friendly) to per-env
+        # bounds, leaving unbounded dimensions untouched
 
         if self.bounds is None:
             return t
 
         low, high = self.bounds
 
-        # scalar (0-dim) actions — e.g. Box(shape = (), ...) — are reshaped out and back
+        # scalar (0-dim) actions — e.g. Box(shape = (), ...) — reshape out and back
 
         was_scalar = t.ndim == 0
 
@@ -116,7 +107,6 @@ class ActionTransformWrapper:
         dim = t.shape[-1]
         low = np.broadcast_to(low, (dim,))
         high = np.broadcast_to(high, (dim,))
-
         valid = np.isfinite(low) & np.isfinite(high)
 
         if is_tensor(t):
@@ -125,15 +115,12 @@ class ActionTransformWrapper:
             high = torch.tensor(high, dtype = dtype, device = device)
             valid = torch.tensor(valid, device = device)
 
-            rescaled = rescale(t, self.from_range, (low, high))
-            rescaled = torch.clamp(rescaled, low, high)
+        rescaled = rescale(t, self.from_range, (low, high))
 
-            rescaled = torch.where(valid, rescaled, t)
+        if is_tensor(t):
+            rescaled = torch.where(valid, torch.clamp(rescaled, low, high), t)
         else:
-            rescaled = rescale(t, self.from_range, (low, high))
-            rescaled = np.clip(rescaled, low, high)
-
-            rescaled = np.where(valid, rescaled, t)
+            rescaled = np.where(valid, np.clip(rescaled, low, high), t)
 
         if was_scalar:
             rescaled = rescaled.reshape(())

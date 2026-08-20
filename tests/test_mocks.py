@@ -20,7 +20,12 @@ from env_ssl_wrapper.mocks import (
     DMControlRoboticsMockEnv,
     RobosuiteMockEnv,
     IsaacLabMockEnv,
-    ManiSkillMockEnv
+    ManiSkillMockEnv,
+    BraxMockEnv,
+    MetaWorldMockEnv,
+    TrifingerMockEnv,
+    HabitatMockEnv,
+    TupleObsMockEnv
 )
 
 from env_ssl_wrapper.done_tracker_wrapper import get_batch_size
@@ -40,7 +45,12 @@ MOCKS = [
     RobosuiteMockEnv(),
     IsaacLabMockEnv(),
     ManiSkillMockEnv(),
-    ManiSkillMockEnv(num_envs = 4, obs_mode = 'rgbd')
+    ManiSkillMockEnv(num_envs = 4, obs_mode = 'rgbd'),
+    BraxMockEnv(),
+    MetaWorldMockEnv(),
+    TrifingerMockEnv(),
+    HabitatMockEnv(),
+    TupleObsMockEnv()
 ]
 
 def sample_actions(batch_size, action_space):
@@ -76,7 +86,7 @@ def test_mock_through_full_pipeline(env):
         assert is_tensor(terminated)
         assert is_tensor(truncated)
 
-        if isinstance(obs, dict):
+        if isinstance(obs, dict) or isinstance(obs, tuple):
             leaves, _ = torch.utils._pytree.tree_flatten(obs)
             assert all(is_tensor(leaf) for leaf in leaves)
         else:

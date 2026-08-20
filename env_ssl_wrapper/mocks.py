@@ -456,3 +456,133 @@ class ManiSkillMockEnv(MockEnv):
 
     def close(self):
         pass
+
+# jax.Array stand-in — brax / gymnax / jumanji emit jax arrays, which are
+# neither torch tensors nor numpy ndarray subclasses; the wrappers normalize
+# them through the __array__ protocol
+
+class JaxArray:
+    def __init__(self, arr):
+        self._arr = np.asarray(arr)
+
+    def __array__(self, dtype = None):
+        return np.asarray(self._arr, dtype = dtype)
+
+    @property
+    def dtype(self):
+        return self._arr.dtype
+
+    @property
+    def ndim(self):
+        return self._arr.ndim
+
+    @property
+    def shape(self):
+        return self._arr.shape
+
+    def __len__(self):
+        return len(self._arr)
+
+    def __or__(self, other):
+        return JaxArray(self._arr | np.asarray(other))
+
+    def __repr__(self):
+        return f'JaxArray({self._arr!r})'
+
+# brax — vectorized, obs / reward / dones are jax arrays, 4-tuple step, obs-only reset
+
+class BraxMockEnv(MockEnv):
+    num_envs = 4
+    is_vector = True
+
+    def reset(self):
+        self.reset_state()
+        return JaxArray(self.obs())
+
+    def step(self, action):
+        self.advance(action)
+        return JaxArray(self.obs()), JaxArray(np.ones(self.num_envs)), JaxArray(self.is_done()), {}
+
+# meta-world — sawyer manipulation: 4-tuple step with np.bool_ done, obs-only reset
+
+class MetaWorldMockEnv(MockEnv):
+    obs_dim = 39
+    action_dim = 4
+    max_steps = 500
+
+    def reset(self):
+        self.reset_state()
+        return self.obs()
+
+    def step(self, action):
+        self.advance(action)
+        done = self.is_done()
+        return self.obs(), np.float64(1.0), np.bool_(done), dict(success = bool(self.rng.random() < 0.1))
+
+# trifinger — dexterous manipulation: goal-conditioned dict obs, 4-tuple step,
+# scalar reward (the real reward lives in info['rewards']), obs-only reset
+
+class TrifingerMockEnv(MockEnv):
+    obs_dim = 31
+    action_dim = 9
+    max_steps = 60
+
+    def reset(self):
+        self.reset_state()
+        return self.obs_dict()
+
+    def obs_dict(self):
+        return dict(
+            observation = self.obs(),
+            action = np.zeros(self.action_dim),
+            desired_goal = np.zeros(self.obs_dim),
+            achieved_goal = self.obs()
+        )
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 0.0, np.bool_(self.is_done()), dict(
+            rewards = dict(dense = 1.0, sparse = 0.0),
+            is_success = np.bool_(self.is_done())
+        )
+
+# habitat — embodied navigation: dict obs with uint8/depth images + proprio,
+# 4-tuple step, obs-only reset
+
+class HabitatMockEnv(MockEnv):
+    obs_dim = 2
+    action_dim = 2
+    max_steps = 100
+
+    def obs_dict(self):
+        return dict(
+            rgb = np.zeros((32, 32, 3), dtype = np.uint8),
+            depth = np.zeros((32, 32, 1), dtype = np.float32),
+            gps = self.obs(),
+            compass = np.zeros(1, dtype = np.float32)
+        )
+
+    def reset(self):
+        self.reset_state()
+        return self.obs_dict()
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), np.float32(0.1), np.bool_(self.is_done()), dict(collided = False)
+
+# tuple-obs env (e.g. composite MultiDiscrete+Box spaces) — vectorized, obs is
+# a tuple of arrays, 5-tuple step
+
+class TupleObsMockEnv(MockEnv):
+    num_envs = 4
+    is_vector = True
+
+    def obs(self):
+        return (
+            self.state + self.rng.standard_normal((self.num_envs, self.obs_dim)),
+            np.ones((self.num_envs, 3))
+        )
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs(), np.ones(self.num_envs), self.is_done(), np.zeros(self.num_envs, dtype = bool), {}

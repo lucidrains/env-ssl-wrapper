@@ -204,3 +204,84 @@ def test_seed_dm_control_real():
     env.seed(1)
     ts_b = env.env.reset()
     assert np.array_equal(ts_a.observation['velocity'], ts_b.observation['velocity'])
+
+# dm_control-style envs seed via task._random (a RandomState, as in dm_control)
+
+class TaskRandomMockEnv(DMControlMockEnv):
+    def __init__(self, seed = 0):
+        super().__init__(seed)
+        self.task = type('Task', (), dict(_random = np.random.RandomState()))()
+
+def test_seed_dm_control_task_random():
+    env = StandardizeWrapper(TaskRandomMockEnv())
+
+    env.seed(42)
+    a = env.unwrapped.task._random.standard_normal()
+    env.seed(42)
+    b = env.unwrapped.task._random.standard_normal()
+
+    assert a == b
+
+# legacy envs (obs-only reset, no seed kwarg) fall back to env.seed()
+
+def test_seed_legacy_env_fallback():
+    env = StandardizeWrapper(LegacyGymMockEnv())
+    env.seed(5)
+    obs_a, info = env.reset()
+    env.seed(5)
+    obs_b, info = env.reset()
+    assert np.array_equal(obs_a, obs_b)
+
+# duck-typed TimeStep without a last() method — step_type == 2 fallback
+
+class NoLastTimeStep:
+    step_type = 2
+    reward = 1.0
+    discount = 1.0
+    observation = np.zeros(3)
+
+class NoLastTimeStepEnv:
+    def reset(self):
+        return NoLastTimeStep()
+
+    def step(self, action):
+        return NoLastTimeStep()
+
+def test_timestep_without_last_method():
+    env = StandardizeWrapper(NoLastTimeStepEnv())
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros(2))
+    assert terminated  # step_type == 2 means LAST
+    assert not truncated
+    assert info['discount'] == 1.0
+
+# some legacy envs return (obs, None) from reset — coerced to {} by standardize
+
+class NoneInfoEnv:
+    def reset(self):
+        return np.zeros(2), None
+
+    def step(self, action):
+        return np.zeros(2), 0.0, False, False, {}
+
+def test_reset_none_info_coerced():
+    env = StandardizeWrapper(NoneInfoEnv())
+    obs, info = env.reset()
+    assert isinstance(info, dict)
+
+# step outputs of unexpected length are rejected loudly
+
+class TwoTupleStepEnv:
+    def reset(self):
+        return np.zeros(2), {}
+
+    def step(self, action):
+        return (np.zeros(2), np.zeros(2))
+
+def test_unknown_step_length_raises():
+    env = StandardizeWrapper(TwoTupleStepEnv())
+    env.reset()
+
+    with pytest.raises(ValueError, match = 'length 2'):
+        env.step(np.zeros(2))

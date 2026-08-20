@@ -98,3 +98,45 @@ def test_done_tracker_needs_reset_error():
 
     with pytest.raises(AssertionError, match = 'environment needs reset'):
         env.step(np.array([0]))
+
+# active-mask bookkeeping — the exposed properties track partial terminations
+
+def test_done_tracker_properties():
+    raw = gym.make_vec('CartPole-v1', num_envs = 4)
+    env = DoneTrackerWrapper(raw)
+    env.reset()
+
+    while not env.is_done.any():
+        obs, reward, terminated, truncated, info = env.step(raw.action_space.sample())
+
+    assert env.num_active == 3
+    assert env.active_mask.sum() == 3
+    assert np.array_equal(env.active_indices, np.where(~env.is_done)[0])
+    assert not env.all_done
+    assert not env.needs_reset
+
+# num_envs adapts when reset returns a different batch size
+
+class ResizeEnv:
+    num_envs = 4
+    is_vector = True
+
+    def __init__(self):
+        self.batch = 4
+
+    def reset(self, **kwargs):
+        return np.zeros((self.batch, 2)), {}
+
+    def step(self, action):
+        return np.zeros((self.batch, 2)), np.ones(self.batch), np.zeros(self.batch, dtype = bool), np.zeros(self.batch, dtype = bool), {}
+
+def test_done_tracker_batch_size_change_on_reset():
+    env = DoneTrackerWrapper(ResizeEnv())
+    obs, info = env.reset()
+    assert env.num_envs == 4
+
+    env.env.batch = 2
+    obs, info = env.reset()
+    assert env.num_envs == 2
+    assert len(env.episode_lengths) == 2
+    assert len(env.is_done) == 2

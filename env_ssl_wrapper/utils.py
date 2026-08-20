@@ -24,9 +24,6 @@ WRAPPERS = dict(
     pad_episodes = EpisodePaddingWrapper
 )
 
-def is_unique(arr):
-    return len(set(arr)) == len(arr)
-
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):
         wrapper = WRAPPERS[wrapper]
@@ -34,6 +31,9 @@ def parse_wrapper(wrapper):
     if isinstance(wrapper, tuple):
         name, kwargs = wrapper
         wrapper = partial(WRAPPERS.get(name, name), **kwargs)
+
+    elif isinstance(wrapper, dict):
+        raise ValueError("wrapper kwargs must be passed as (name, kwargs), e.g. ('tensor', dict(device = 'cpu'))")
 
     cls = wrapper.func if isinstance(wrapper, partial) else wrapper
     return wrapper, cls
@@ -52,13 +52,15 @@ def compose_env(env, *wrappers):
         classes.insert(0, StandardizeWrapper)
 
     # vectorized envs always get standardized episode padding + a persistent
-    # final_observation, so uneven terminations emit zeros/False uniformly
+    # final_observation, so uneven terminations emit zeros/False uniformly.
+    # inserted right after standardize (inside any tensor / flatten wrappers)
+    # so foreign array-like obs (jax) are normalized before the final cast
 
     if EpisodePaddingWrapper not in classes and is_vectorized(env):
-        funcs.append(EpisodePaddingWrapper)
-        classes.append(EpisodePaddingWrapper)
+        funcs.insert(1, EpisodePaddingWrapper)
+        classes.insert(1, EpisodePaddingWrapper)
 
-    assert is_unique(classes), 'duplicate wrappers found'
+    assert len(set(classes)) == len(classes), 'duplicate wrappers found'
 
     for func in funcs:
         env = func(env)

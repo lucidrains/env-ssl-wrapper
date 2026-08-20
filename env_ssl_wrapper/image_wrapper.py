@@ -6,12 +6,10 @@ import numpy as np
 
 from einops import rearrange
 
+from .helpers import EnvWrapper, exists
 from .standardize_wrapper import normalize_reset_out, normalize_step_out
 
 # helper functions
-
-def exists(v):
-    return v is not None
 
 def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
@@ -59,7 +57,10 @@ def render_frame(env, image_size = (64, 64), camera = None):
 
     if not exists(img):
         if getattr(env, 'render_mode', 'custom') is None:
-            raise ValueError('env must be created with render_mode = "rgb_array", e.g. gym.make(id, render_mode = "rgb_array")')
+            raise ValueError(
+                'env must be created with render_mode = "rgb_array", '
+                'e.g. gym.make(id, render_mode = "rgb_array")'
+            )
 
         img = env.render()
 
@@ -69,7 +70,14 @@ def render_frame(env, image_size = (64, 64), camera = None):
     img = np.ascontiguousarray(img)
     img = torch.from_numpy(img)
     return rearrange(img, 'h w c -> 1 c h w')
-def process_image(img, image_size = (64, 64), mode = 'area', normalize = True, normalize_divisor = 255.0):
+
+def process_image(
+    img,
+    image_size = (64, 64),
+    mode = 'area',
+    normalize = True,
+    normalize_divisor = 255.0
+):
     dtype = img.dtype
     img = img.float()
 
@@ -85,7 +93,7 @@ def process_image(img, image_size = (64, 64), mode = 'area', normalize = True, n
 
 # class
 
-class ImageObservationWrapper:
+class ImageObservationWrapper(EnvWrapper):
     def __init__(
         self,
         env,
@@ -96,7 +104,7 @@ class ImageObservationWrapper:
         normalize = True,
         normalize_divisor = 255.0
     ):
-        self.env = env
+        super().__init__(env)
         self.image_size = cast_tuple(image_size, 2)
         self.image_key = image_key
         self.camera = camera
@@ -104,14 +112,15 @@ class ImageObservationWrapper:
         self.normalize = normalize
         self.normalize_divisor = normalize_divisor
 
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
-
     def render_frame(self):
         img = render_frame(self.env, image_size = self.image_size, camera = self.camera)
-        return process_image(img, image_size = self.image_size, mode = self.mode, normalize = self.normalize, normalize_divisor = self.normalize_divisor)
+        return process_image(
+            img,
+            image_size = self.image_size,
+            mode = self.mode,
+            normalize = self.normalize,
+            normalize_divisor = self.normalize_divisor
+        )
 
     def observation(self, obs):
         img = self.render_frame()

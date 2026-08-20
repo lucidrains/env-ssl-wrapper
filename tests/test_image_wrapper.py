@@ -80,3 +80,11 @@ def test_image_wrapper_requires_render_mode():
 
     with pytest.raises(ValueError, match = 'render_mode'):
         env.reset()
+
+# a scalar image_size expands to (size, size)
+
+def test_scalar_image_size_expands():
+    from env_ssl_wrapper.image_wrapper import cast_tuple
+
+    assert cast_tuple(32, 2) == (32, 32)
+    assert cast_tuple((16, 32), 2) == (16, 32)

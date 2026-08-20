@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import is_tensor
 import gymnasium as gym
@@ -23,3 +24,58 @@ def test_tensor_wrapper():
     assert is_tensor(reward)
     assert is_tensor(terminated)
     assert is_tensor(truncated)
+
+# convert_out = False — the stream stays in the sim's native type
+
+def test_convert_out_false():
+    env = TensorWrapper(gym.make('CartPole-v1'), convert_out = False)
+
+    obs, info = env.reset()
+    assert not is_tensor(obs)
+    assert isinstance(obs, np.ndarray)
+
+    obs, reward, terminated, truncated, info = env.step(np.int64(0))
+    assert not is_tensor(reward)
+
+# convert_in = False — actions pass through untouched, no numpy coercion
+
+def test_convert_in_false():
+    env = TensorWrapper(gym.make('CartPole-v1'), convert_in = False)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.int64(0))
+    assert is_tensor(obs)  # outbound conversion still applies
+
+# cast_obs_to_float = False — integer observations keep their dtype
+
+class IntObsEnv:
+    def reset(self, **kwargs):
+        return np.array([3], dtype = np.int64), {}
+
+    def step(self, action):
+        return np.array([2], dtype = np.int64), 1.0, False, False, {}
+
+def test_cast_obs_to_float_false():
+    env = TensorWrapper(IntObsEnv(), device = 'cpu', cast_obs_to_float = False)
+    obs, info = env.reset()
+    assert obs.dtype == torch.int64
+
+# terminal-obs bookkeeping in reset info follows the torch contract too
+
+class ResetFinalInfoEnv:
+    def reset(self, **kwargs):
+        return np.zeros(2), dict(
+            final_observation = np.ones(2),
+            _final_observation = True
+        )
+
+    def step(self, action):
+        return np.zeros(2), 0.0, False, False, {}
+
+def test_reset_time_final_observation_cast():
+    env = TensorWrapper(ResetFinalInfoEnv(), device = 'cpu')
+    obs, info = env.reset()
+
+    assert is_tensor(info['final_observation'])
+    assert info['final_observation'].dtype == torch.float32
+    assert info['_final_observation'].dtype == torch.bool

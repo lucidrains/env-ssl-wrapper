@@ -7,17 +7,24 @@ import torch
 from torch import tensor, is_tensor, from_numpy, device as torch_device
 from torch.utils._pytree import tree_map
 
+from .helpers import EnvWrapper, is_scalar
+
 # helper functions
 
 def numpy_to_torch(x, device, cast_obs_to_float = True):
-    def _to_torch(t):
-        if isinstance(t, np.ndarray):
-            t = from_numpy(t)
-        elif isinstance(t, (int, float, bool, np.number, np.bool_)):
-            t = tensor(t)
+    # numpy / scalars / foreign array-likes (jax) to torch on device;
+    # non-bool leaves are cast to float32 unless disabled
 
+    def _to_torch(t):
         if not is_tensor(t):
-            return t
+            if isinstance(t, np.ndarray):
+                t = from_numpy(t)
+            elif is_scalar(t):
+                t = tensor(t)
+            elif hasattr(t, '__array__'):
+                t = from_numpy(np.asarray(t))
+            else:
+                return t
 
         if cast_obs_to_float and t.dtype != torch.bool:
             t = t.float()
@@ -26,19 +33,21 @@ def numpy_to_torch(x, device, cast_obs_to_float = True):
     return tree_map(_to_torch, x)
 
 def torch_to_numpy(x):
+    # torch / scalars / array-likes to numpy; 0-dim arrays collapse to
+    # scalars, float64 casts to float32
+
     def _to_numpy(t):
         if is_tensor(t):
             t = t.detach().cpu().numpy()
-        elif isinstance(t, (int, float, bool, np.number, np.bool_)):
-            t = np.array(t)
-
-        if not isinstance(t, np.ndarray):
+        elif is_scalar(t):
+            t = np.asarray(t)
+        else:
             return t
 
         if t.ndim == 0:
-            t = t.item()
+            return t.item()
 
-        elif t.dtype == np.float64:
+        if t.dtype == np.float64:
             t = t.astype(np.float32)
 
         return t
@@ -51,9 +60,9 @@ def contract(t, to_float = False):
         return t
     return t.float() if to_float else t.bool()
 
-# classes
+# class
 
-class TensorWrapper:
+class TensorWrapper(EnvWrapper):
     def __init__(
         self,
         env,
@@ -63,26 +72,34 @@ class TensorWrapper:
         cast_obs_to_float: bool = True,
         cast_float64_to_float32: bool | None = None
     ):
+        super().__init__(env)
+
         # deprecated alias, kept for backwards compatibility
 
         if cast_float64_to_float32 is not None:
             cast_obs_to_float = cast_float64_to_float32
 
-        self.env = env
         self.device = torch_device(device)
         self.convert_in = convert_in
         self.convert_out = convert_out
         self.cast_obs_to_float = cast_obs_to_float
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
+    def cast_info(self, info):
+        # terminal-obs bookkeeping follows the same torch contract as the stream
+
+        if isinstance(info, dict) and 'final_observation' in info:
+            info['final_observation'] = self.cast(info['final_observation'])
+            info['_final_observation'] = contract(self.cast(info['_final_observation']))
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        return (self.cast(obs), info) if self.convert_out else (obs, info)
+
+        if self.convert_out:
+            obs = self.cast(obs)
+            self.cast_info(info)
+
+        return obs, info
 
     def step(self, action):
         action = torch_to_numpy(action) if self.convert_in else action
@@ -95,5 +112,6 @@ class TensorWrapper:
         reward = contract(self.cast(reward), to_float = True)
         terminated = contract(self.cast(terminated))
         truncated = contract(self.cast(truncated))
+        self.cast_info(info)
 
         return obs, reward, terminated, truncated, info

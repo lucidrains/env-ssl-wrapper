@@ -65,3 +65,26 @@ def test_duplicate_wrappers_error():
             'auto_batch',
             'auto_batch'
         )
+
+# wrapper classes can be passed directly, with kwargs as a (class, dict) tuple
+
+def test_compose_with_wrapper_classes():
+    from env_ssl_wrapper import TensorWrapper
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        (TensorWrapper, dict(device = 'cpu')),
+        'done_tracker'
+    )
+
+    obs, info = env.reset()
+    assert is_tensor(obs)
+    assert 'episode_lengths' in info
+
+# a bare kwargs dict (not wrapped in a tuple) fails with a clear message
+
+def test_compose_bare_kwargs_dict_raises():
+    from env_ssl_wrapper import TensorWrapper
+
+    with pytest.raises(ValueError, match = '\(name, kwargs\)'):
+        compose_env(gym.make('CartPole-v1'), dict(device = 'cpu'))

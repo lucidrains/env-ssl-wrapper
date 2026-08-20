@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from torch import is_tensor
-from torch.utils._pytree import tree_map, tree_flatten
+from torch.utils._pytree import tree_flatten
 
 from .auto_batched_wrapper import AutoBatchedWrapper, is_vectorized
+from .helpers import EnvWrapper, dones_of, exists, to_numpy
 
 # helper functions
-
-def exists(v):
-    return v is not None
 
 def get_batch_size(tree) -> int | None:
     leaves, _ = tree_flatten(tree)
@@ -21,27 +18,19 @@ def get_batch_size(tree) -> int | None:
     first = leaves[0]
     return len(first) if hasattr(first, '__len__') else None
 
-def to_numpy(t):
-    return t.detach().cpu().numpy() if is_tensor(t) else np.asarray(t)
-
 # classes
 
-class DoneTrackerWrapper:
+class DoneTrackerWrapper(EnvWrapper):
     def __init__(self, env):
         if not is_vectorized(env):
             env = AutoBatchedWrapper(env)
 
-        self.env = env
+        super().__init__(env)
         self.num_envs = getattr(env, 'num_envs', 1)
 
         self.is_done = np.zeros(self.num_envs, dtype = bool)
         self.episode_lengths = np.zeros(self.num_envs, dtype = int)
         self.has_reset = False
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
 
     @property
     def active_mask(self) -> np.ndarray:
@@ -85,7 +74,7 @@ class DoneTrackerWrapper:
 
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        dones = tree_map(lambda a, b: a | b, terminated, truncated)
+        dones = dones_of(terminated, truncated)
         dones_np = to_numpy(dones).astype(bool)
 
         self.episode_lengths[active_before] += 1

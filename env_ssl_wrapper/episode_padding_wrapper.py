@@ -1,22 +1,21 @@
 from __future__ import annotations
 
+from functools import partial
+
 import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 
 from .auto_batched_wrapper import is_vectorized
+from .helpers import EnvWrapper, dones_of, exists, to_numpy
 
 # helper functions
 
-def exists(v):
-    return v is not None
-
-def to_numpy(t):
-    return t.detach().cpu().numpy() if is_tensor(t) else np.asarray(t)
-
-def zero_pad(x, mask):
-    # dtype-preserving padding: floats/ints -> 0, bool -> False
+def zero_mask(x, mask, fill_scalar = None):
+    # dtype-preserving padding under mask: floats/ints -> 0, bool -> False.
+    # scalar leaves pass through untouched, unless fill_scalar is given
+    # (used to zero scalar rewards when any slot is masked)
 
     if is_tensor(x):
         m = torch.as_tensor(mask, dtype = torch.bool, device = x.device)
@@ -26,33 +25,16 @@ def zero_pad(x, mask):
 
         return torch.where(m, torch.zeros_like(x), x)
 
-    if isinstance(x, np.ndarray):
-        if x.ndim == 0:
-            return x
+    arr = np.asarray(x)
 
-        out = x.copy()
-        out[mask] = 0
-        return out
+    if arr.ndim == 0:
+        if fill_scalar is not None and bool(np.asarray(mask).any()):
+            return fill_scalar
+        return x
 
-    return x
-
-def zero_reward(r, mask):
-    if is_tensor(r):
-        m = torch.as_tensor(mask, dtype = torch.bool, device = r.device)
-
-        while m.ndim < r.ndim:
-            m = m.unsqueeze(-1)
-
-        return torch.where(m, torch.zeros_like(r), r)
-
-    if isinstance(r, np.ndarray):
-        m = np.asarray(mask, dtype = bool)
-
-        out = r.copy()
-        out[m] = 0
-        return out
-
-    return 0.0 if bool(np.asarray(mask).any()) else r
+    out = arr.copy()
+    out[mask] = 0
+    return out
 
 def back_to_mask_type(dones, newly):
     if is_tensor(dones):
@@ -77,16 +59,18 @@ def merge_final(current, value, mask):
 
         return torch.where(m, value, current)
 
-    if isinstance(current, np.ndarray):
-        out = current.copy()
-        out[mask] = value[mask]
-        return out
+    curr = np.asarray(current)
 
-    return current
+    if curr.ndim == 0:
+        return current
+
+    out = curr.copy()
+    out[mask] = np.asarray(value)[mask]
+    return out
 
 # class
 
-class EpisodePaddingWrapper:
+class EpisodePaddingWrapper(EnvWrapper):
     # standardized padding for uneven vectorized episodes: when an env
     # terminates early, its obs slot is zeroed (floats/ints -> 0, bool -> False)
     # on the terminating step and every step after, regardless of whether the
@@ -101,16 +85,11 @@ class EpisodePaddingWrapper:
     # masking which envs it applies to.
 
     def __init__(self, env):
-        self.env = env
+        super().__init__(env)
         self.is_vector = is_vectorized(env)
         self._last_obs = None
         self._is_done = None
         self._final_obs = None
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -125,7 +104,7 @@ class EpisodePaddingWrapper:
         if self.is_vector:
             info = info if isinstance(info, dict) else {}
 
-            dones = tree_map(lambda a, b: a | b, terminated, truncated)
+            dones = dones_of(terminated, truncated)
             mask = to_numpy(dones).astype(bool)
 
             if mask.any():
@@ -144,15 +123,15 @@ class EpisodePaddingWrapper:
                     if self._final_obs is None:
                         self._final_obs = tree_map(copy_leaf, value)
                     else:
-                        self._final_obs = tree_map(lambda a, b: merge_final(a, b, newly), self._final_obs, value)
+                        self._final_obs = tree_map(partial(merge_final, mask = newly), self._final_obs, value)
 
-                obs = tree_map(lambda x: zero_pad(x, mask), obs)
+                obs = tree_map(partial(zero_mask, mask = mask), obs)
 
                 # zero rewards only for envs that were already done before this
                 # step - the terminating step's own reward is the real terminal
                 # transition reward and must survive for the return calculation
 
-                reward = zero_reward(reward, mask & ~newly)
+                reward = zero_mask(reward, mask & ~newly, fill_scalar = 0.0)
 
                 info['final_observation'] = self._final_obs
                 info['_final_observation'] = back_to_mask_type(dones, mask)

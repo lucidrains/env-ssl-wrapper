@@ -52,6 +52,17 @@ def test_action_transform_wrapper():
 
     assert np.allclose(env.last_action, np.array([-1., 2.]))
 
+# a single transform without indices applies to the whole action vector
+
+def test_single_transform_applies_to_whole_action():
+    env = MockEnv()
+    transform = dict(rescale_from_to = ((0., 1.), (-1., 1.)))
+
+    wrapper = ActionTransformWrapper(env, transforms = transform)
+    wrapper.step(np.array([0., 1.], dtype = np.float32))
+
+    assert np.allclose(env.last_action, np.array([-1., 1.]))
+
 # auto rescale — policy emits in canonical (0, 1) (beta-friendly),
 # wrapper maps to any env's action bounds, leaving unbounded dims untouched
 

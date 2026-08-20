@@ -243,6 +243,21 @@ def test_single_env_passthrough():
     assert 'final_observation' not in info
     assert '_final_observation' not in info
 
+# stepping without reset first fails loudly once an env terminates
+
+def test_step_without_reset_raises():
+    class InstantDoneEnv:
+        num_envs = 2
+        is_vector = True
+
+        def step(self, action):
+            return np.zeros((2, 2)), np.ones(2), np.ones(2, dtype = bool), np.zeros(2, dtype = bool), {}
+
+    env = EpisodePaddingWrapper(InstantDoneEnv())
+
+    with pytest.raises(AssertionError, match = 'needs reset'):
+        env.step(np.zeros((2, 2)))
+
 # compose_env integration — pads after tensor conversion
 
 def test_compose_env_pad_episodes():

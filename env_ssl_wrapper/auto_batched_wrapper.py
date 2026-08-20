@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-from torch import is_tensor
 from torch.utils._pytree import tree_map
 from einops import rearrange
 
+from .helpers import EnvWrapper, default, exists, is_array, is_scalar
+
 # helper functions
-
-def exists(v):
-    return v is not None
-
-def default(v, d):
-    return v if exists(v) else d
 
 def is_vectorized(env) -> bool:
     if getattr(env, 'is_vector', False):
@@ -42,16 +37,21 @@ def is_vectorized(env) -> bool:
 
 def maybe_expand_dim(x):
     def _expand(t):
-        if isinstance(t, np.ndarray) or is_tensor(t):
+        if is_array(t):
+            if t.ndim == 0:
+                return t.reshape(1)
             return rearrange(t, '... -> 1 ...')
-        if isinstance(t, (int, float, bool, np.number, np.bool_)):
+        if is_scalar(t):
             return np.array([t])
+        if hasattr(t, '__array__'):
+            # foreign array-likes (jax) normalize to numpy with a leading dim
+            return np.expand_dims(np.asarray(t), 0)
         return t
     return tree_map(_expand, x)
 
 def maybe_squeeze_dim(x):
     def _squeeze(t):
-        if isinstance(t, np.ndarray) or is_tensor(t):
+        if is_array(t):
             if t.ndim == 0:
                 return t
 
@@ -61,20 +61,27 @@ def maybe_squeeze_dim(x):
                 return t.item()
 
             return t
+
+        # foreign array-likes (jax) — normalize to numpy, dropping a leading 1
+
+        if hasattr(t, '__array__'):
+            arr = np.asarray(t)
+
+            if arr.ndim == 0 or arr.shape[0] != 1:
+                return t
+
+            arr = arr.reshape(arr.shape[1:])
+            return arr.item() if arr.ndim == 0 else arr
+
         return t
     return tree_map(_squeeze, x)
 
 # classes
 
-class AutoBatchedWrapper:
+class AutoBatchedWrapper(EnvWrapper):
     def __init__(self, env, is_vector: bool | None = None):
-        self.env = env
+        super().__init__(env)
         self.is_vector = default(is_vector, is_vectorized(env))
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

@@ -5,17 +5,21 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten
 
+from .helpers import EnvWrapper, is_array, is_scalar
+
 # helper functions
 
 def flattenable(t):
-    if is_tensor(t) or isinstance(t, np.ndarray):
+    if is_array(t) or is_scalar(t):
         return True
-    if isinstance(t, (int, float, bool, np.number, np.bool_)):
-        return True
-    return False
+    # foreign array-likes (jax) — string leaves are dropped, not flattened
+    try:
+        return np.asarray(t).dtype.kind not in 'USO'
+    except Exception:
+        return False
 
 def flatten_leaf(t):
-    if isinstance(t, (int, float, bool, np.number, np.bool_)):
+    if not is_array(t):
         t = np.asarray(t)
 
     if t.ndim == 0:
@@ -33,17 +37,12 @@ def concat_leaves(leaves):
 
 # class
 
-class FlattenObsWrapper:
+class FlattenObsWrapper(EnvWrapper):
     def __init__(self, env):
-        self.env = env
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(f"attempted to get missing private attribute '{name}'")
-        return getattr(self.env, name)
+        super().__init__(env)
 
     def observation(self, obs):
-        if is_tensor(obs) or isinstance(obs, np.ndarray):
+        if is_array(obs):
             return obs
 
         leaves, _ = tree_flatten(obs)

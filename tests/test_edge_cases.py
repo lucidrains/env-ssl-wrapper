@@ -463,3 +463,42 @@ def test_int_done_not_truncated():
     obs, reward, terminated, truncated, info = env.step(np.zeros(2))
     assert terminated
     assert not truncated
+
+# wrapper base class — everything not defined on the wrapper delegates to the
+# env, but private attributes never leak (wrappers hold their own state)
+
+def test_wrapper_delegation_and_private_guard():
+    from env_ssl_wrapper.mocks import GymnasiumMockEnv
+
+    env = StandardizeWrapper(GymnasiumMockEnv())
+
+    # public attrs delegate to the underlying env
+    assert env.max_steps == 40
+    assert env.unwrapped is env.env
+
+    # private attrs are never delegated — they belong to the wrapper itself
+    assert not hasattr(env, '_nonsense_private')
+
+    with pytest.raises(AttributeError):
+        env._nonsense_private
+
+# is_vectorized sees through wrapper chains
+
+def test_is_vectorized_wrapped_envs():
+    from env_ssl_wrapper.auto_batched_wrapper import is_vectorized
+    from env_ssl_wrapper.mocks import GymnasiumMockEnv, IsaacMockEnv, RobosuiteMockEnv
+
+    assert not is_vectorized(StandardizeWrapper(RobosuiteMockEnv()))
+    assert not is_vectorized(TensorWrapper(GymnasiumMockEnv()))
+    assert is_vectorized(StandardizeWrapper(IsaacMockEnv()))
+    assert is_vectorized(StandardizeWrapper(TensorWrapper(IsaacMockEnv())))
+
+# zero_mask — scalar rewards collapse to the fill when any slot is masked
+
+def test_zero_mask_scalar_fill():
+    from env_ssl_wrapper.episode_padding_wrapper import zero_mask
+
+    mask = np.array([True, False])
+    assert zero_mask(1.0, mask) == 1.0  # no fill_scalar -> untouched
+    assert zero_mask(1.0, mask, fill_scalar = 0.0) == 0.0
+    assert zero_mask(1.0, np.array([False, False]), fill_scalar = 0.0) == 1.0
