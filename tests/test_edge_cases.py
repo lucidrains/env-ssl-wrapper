@@ -369,6 +369,61 @@ def test_flatten_nested_dict():
     out, info = env.reset()
     assert out.shape == (2, 5)
 
+# flatten — final_observation in info follows the flattened stream, so the
+# terminal obs stacks with the obs batch for SSL
+
+def test_flatten_final_observation():
+    class TerminalEnv:
+        def reset(self, **kwargs):
+            return dict(obs = np.zeros((1, 4)), goal = np.zeros((1, 3))), {}
+
+        def step(self, action):
+            return dict(obs = np.zeros((1, 4)), goal = np.zeros((1, 3))), 1.0, True, False, {
+                'final_observation': dict(obs = np.ones((1, 4)), goal = np.ones((1, 3))),
+                '_final_observation': True,
+            }
+
+    env = FlattenObsWrapper(TerminalEnv())
+    obs, info = env.reset()
+    assert obs.shape == (1, 7)
+
+    obs, reward, terminated, truncated, info = env.step(dict(obs = np.zeros((1, 4)), goal = np.zeros((1, 3))))
+    assert obs.shape == (1, 7)
+    assert info['final_observation'].shape == (1, 7)
+    assert np.array_equal(info['final_observation'], np.ones((1, 7)))
+
+# flatten — unbatched dict obs (no auto_batch first) still flattens to a vector
+
+def test_flatten_unbatched_dict():
+    class DictEnv:
+        def reset(self, **kwargs):
+            return dict(obs = np.zeros(4), goal = np.zeros(3)), {}
+
+        def step(self, action):
+            return self.reset()[0], 0.0, False, False, {}
+
+    env = FlattenObsWrapper(DictEnv())
+    obs, info = env.reset()
+    assert obs.shape == (4 + 3,)
+
+# and a full pipeline without auto_batch — done_tracker auto-batches the flat obs
+
+def test_flatten_unbatched_full_pipeline():
+    class DictEnv:
+        def reset(self, **kwargs):
+            return dict(obs = np.zeros(4), goal = np.zeros(3)), {}
+
+        def step(self, action):
+            return dict(obs = np.zeros(4), goal = np.zeros(3)), 1.0, False, False, {}
+
+    env = compose_env(DictEnv(), 'flatten_obs', ('tensor', dict(device = 'cpu')), 'done_tracker')
+    obs, info = env.reset()
+    assert obs.shape == (1, 7)
+
+    obs, reward, terminated, truncated, info = env.step(torch.zeros(1, 2))
+    assert obs.shape == (1, 7)
+    assert env.num_envs == 1
+
 # tensor — bool observations are never cast to float (mask-type obs survive)
 
 class BoolObsEnv:

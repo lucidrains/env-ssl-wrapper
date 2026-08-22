@@ -81,6 +81,45 @@ def reacher():
     except Exception:
         return gym.make('Reacher-v4')
 
+# gymnasium-robotics — goal-conditioned robotics (fetch, hand, maze).
+# registration API differs across versions (register_envs < 1.4, register_robotics_envs >= 1.4)
+
+def _register_robotics():
+    gymnasium_robotics = pytest.importorskip('gymnasium_robotics')
+
+    if hasattr(gymnasium_robotics, 'register_robotics_envs'):
+        gymnasium_robotics.register_robotics_envs()
+    else:
+        gymnasium_robotics.register_envs()
+
+def fetch_reach():
+    _register_robotics()
+    return gym.make('FetchReach-v4')
+
+def fetch_push():
+    _register_robotics()
+    return gym.make('FetchPush-v4')
+
+def fetch_pick_and_place():
+    _register_robotics()
+    return gym.make('FetchPickAndPlace-v4')
+
+def fetch_slide():
+    _register_robotics()
+    return gym.make('FetchSlide-v4')
+
+def hand_reach():
+    _register_robotics()
+    return gym.make('HandReach-v3')
+
+def point_maze():
+    _register_robotics()
+    return gym.make('PointMaze_UMaze-v3')
+
+def ant_maze():
+    _register_robotics()
+    return gym.make('AntMaze_UMaze-v3')
+
 def dmc_reacher():
     pytest.importorskip('dm_control')
     from dm_control import suite
@@ -100,6 +139,7 @@ ENVS = [
     cartpole, cartpole_vec, pendulum, mountaincar, mountaincar_continuous, acrobot,
     frozenlake, taxi, blackjack,
     halfcheetah, ant, walker2d, reacher,
+    fetch_reach, fetch_push, fetch_pick_and_place, fetch_slide, hand_reach, point_maze, ant_maze,
     dmc_reacher, dmc_cartpole_swingup, dmc_cheetah
 ]
 

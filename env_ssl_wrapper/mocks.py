@@ -503,6 +503,25 @@ class BraxMockEnv(MockEnv):
         self.advance(action)
         return JaxArray(self.obs()), JaxArray(np.ones(self.num_envs)), JaxArray(self.is_done()), {}
 
+# mujoco-mjx — gymnasium-style 5-tuple step, (obs, info) reset, single env, and
+# every stream (obs / reward / dones) is a jax array: the dialect of envs built
+# on the mjx jax physics backend
+
+class MjxMockEnv(MockEnv):
+    obs_dim = 8
+    action_dim = 6
+
+    def reset(self, seed = None, **kwargs):
+        if seed is not None:
+            self.seed(seed)
+        else:
+            self.reset_state()
+        return JaxArray(self.obs()), {}
+
+    def step(self, action):
+        self.advance(action)
+        return JaxArray(self.obs()), JaxArray(np.float32(1.0)), JaxArray(np.bool_(self.is_done())), JaxArray(np.bool_(False)), {}
+
 # meta-world — sawyer manipulation: 4-tuple step with np.bool_ done, obs-only reset
 
 class MetaWorldMockEnv(MockEnv):

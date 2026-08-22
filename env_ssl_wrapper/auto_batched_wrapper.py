@@ -94,4 +94,9 @@ class AutoBatchedWrapper(EnvWrapper):
         if self.is_vector:
             return out
 
-        return *maybe_expand_dim(out[:4]), out[4]
+        obs, reward, terminated, truncated, info = *maybe_expand_dim(out[:4]), out[4]
+
+        if isinstance(info, dict) and 'final_observation' in info:
+            info['final_observation'] = maybe_expand_dim(info['final_observation'])
+
+        return obs, reward, terminated, truncated, info

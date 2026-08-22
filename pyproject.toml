@@ -1,6 +1,6 @@
 [project]
 name = "env-ssl-wrapper"
-version = "0.1.5"
+version = "0.1.6"
 description = "One torch-native interface for any MDP environment"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -43,6 +43,7 @@ examples = []
 test = [
     "pytest",
     "gymnasium>=0.29.1",
+    "gymnasium-robotics",
     "mujoco",
     "dm-control",
     "pygame",

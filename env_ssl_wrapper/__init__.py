@@ -21,6 +21,7 @@ from .mocks import (
     PufferTensorMockEnv,
     ManiSkillMockEnv,
     BraxMockEnv,
+    MjxMockEnv,
     MetaWorldMockEnv,
     TrifingerMockEnv,
     HabitatMockEnv,

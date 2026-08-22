@@ -31,9 +31,19 @@ def flatten_leaf(t):
     return t.reshape(t.shape[0], -1)
 
 def concat_leaves(leaves):
+    # 1-dim leaves are ambiguous — equal lengths stack as columns (already-
+    # batched leaves); differing lengths carry no batch dim (an unbatched
+    # dict obs), so concat along 0
+    axis, flatten = -1, True
+
+    if leaves[0].ndim == 1 and not all(len(t) == len(leaves[0]) for t in leaves):
+        axis, flatten = 0, False
+
+    leaves = [flatten_leaf(t) for t in leaves] if flatten else leaves
+
     if is_tensor(leaves[0]):
-        return torch.cat([flatten_leaf(t) for t in leaves], dim = -1)
-    return np.concatenate([flatten_leaf(t) for t in leaves], axis = -1)
+        return torch.cat(leaves, dim = axis)
+    return np.concatenate(leaves, axis = axis)
 
 # class
 
@@ -56,10 +66,15 @@ class FlattenObsWrapper(EnvWrapper):
 
         return concat_leaves(leaves)
 
+    def final_observation(self, info):
+        if isinstance(info, dict) and 'final_observation' in info:
+            info['final_observation'] = self.observation(info['final_observation'])
+        return info
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        return self.observation(obs), info
+        return self.observation(obs), self.final_observation(info)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        return self.observation(obs), reward, terminated, truncated, info
+        return self.observation(obs), reward, terminated, truncated, self.final_observation(info)
