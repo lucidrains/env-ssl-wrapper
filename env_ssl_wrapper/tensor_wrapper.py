@@ -13,16 +13,18 @@ from .helpers import EnvWrapper, is_scalar
 
 def numpy_to_torch(x, device, cast_obs_to_float = True):
     # numpy / scalars / foreign array-likes (jax) to torch on device;
-    # non-bool leaves are cast to float32 unless disabled
+    # non-bool leaves are cast to float32 unless disabled.
+    # np.array forces a copy — from_numpy would alias the sim's internal
+    # buffer, silently mutating previously returned obs when it overwrites
 
     def _to_torch(t):
         if not is_tensor(t):
             if isinstance(t, np.ndarray):
-                t = from_numpy(t)
+                t = from_numpy(np.array(t))
             elif is_scalar(t):
                 t = tensor(t)
             elif hasattr(t, '__array__'):
-                t = from_numpy(np.asarray(t))
+                t = from_numpy(np.array(t))
             else:
                 return t
 

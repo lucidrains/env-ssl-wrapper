@@ -79,3 +79,41 @@ def test_reset_time_final_observation_cast():
     assert is_tensor(info['final_observation'])
     assert info['final_observation'].dtype == torch.float32
     assert info['_final_observation'].dtype == torch.bool
+
+# sims that reuse an internal obs buffer (pufferlib-style) must never have
+# that buffer aliased into the returned tensors — a zero-copy from_numpy would
+# silently mutate previously returned obs when the sim overwrites the buffer
+
+class ReusingBufferEnv:
+    def __init__(self, dtype = np.float32):
+        self._buf = np.zeros((2, 3), dtype = dtype)
+
+    def reset(self, **kwargs):
+        self._buf[:] = 0
+        return self._buf, {}
+
+    def step(self, action):
+        self._buf += 1
+        return self._buf, np.ones(2), np.zeros(2, dtype = bool), np.zeros(2, dtype = bool), {}
+
+def test_obs_not_aliased_to_env_buffer():
+    env = TensorWrapper(ReusingBufferEnv(), device = 'cpu')
+
+    obs0, info = env.reset()
+    assert torch.equal(obs0, torch.zeros(2, 3))
+
+    obs1, reward, terminated, truncated, info = env.step(None)
+
+    # the buffer was overwritten in place; the reset-time tensor must survive
+    assert torch.equal(obs1, torch.ones(2, 3))
+    assert torch.equal(obs0, torch.zeros(2, 3))
+    assert obs0.data_ptr() != obs1.data_ptr()
+
+def test_obs_not_aliased_cast_disabled():
+    env = TensorWrapper(ReusingBufferEnv(dtype = np.int64), device = 'cpu', cast_obs_to_float = False)
+
+    obs0, info = env.reset()
+    obs1, reward, terminated, truncated, info = env.step(None)
+
+    assert torch.equal(obs0, torch.zeros(2, 3, dtype = torch.int64))
+    assert torch.equal(obs1, torch.ones(2, 3, dtype = torch.int64))
