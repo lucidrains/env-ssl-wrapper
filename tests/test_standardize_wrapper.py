@@ -285,3 +285,101 @@ def test_unknown_step_length_raises():
 
     with pytest.raises(ValueError, match = 'length 2'):
         env.step(np.zeros(2))
+
+# envs that expose no spaces at all — spaces are inferred lazily from the
+# first real observation, mirroring the obs structure leaf by leaf
+
+class BareSpacelessEnv:
+    def reset(self):
+        return np.zeros(6), {}
+
+    def step(self, action):
+        return np.zeros(6), 0.0, False, False, {}
+
+def test_spaceless_env_observation_space_inferred():
+    env = StandardizeWrapper(BareSpacelessEnv())
+
+    assert env.observation_space is None
+    assert env.action_space is None
+
+    env.reset()
+
+    assert env.observation_space.shape == (6,)
+    assert env.action_space is None
+
+# dict / tuple observations infer matching structures of per-leaf shapes
+
+class StructuredSpacelessEnv:
+    def reset(self):
+        return dict(position = np.zeros(3), pixels = np.zeros((8, 8, 3))), {}
+
+    def step(self, action):
+        return (
+            dict(position = np.zeros(3), pixels = np.zeros((8, 8, 3))),
+            0.0, False, False, {}
+        )
+
+def test_structured_obs_inference_mirrors_structure():
+    from env_ssl_wrapper.spaces import InferredSpace
+
+    env = StandardizeWrapper(StructuredSpacelessEnv())
+    env.reset()
+
+    space = env.observation_space
+
+    assert isinstance(space, dict)
+    assert isinstance(space['position'], InferredSpace)
+    assert space['position'].shape == (3,)
+    assert space['pixels'].shape == (8, 8, 3)
+
+# vectorized spaceless envs infer unbatched shapes — the single-env convention
+
+def test_vectorized_obs_inference_strips_batch():
+    class VectorSpacelessEnv:
+        num_envs = 4
+        is_vector = True
+
+        def reset(self):
+            return np.zeros((4, 7)), {}
+
+        def step(self, action):
+            return np.zeros((4, 7)), np.ones(4), np.zeros(4, dtype = bool), np.zeros(4, dtype = bool), {}
+
+    env = StandardizeWrapper(VectorSpacelessEnv())
+    env.reset()
+
+    assert env.observation_space.shape == (7,)
+
+# dm_control-style specs back the action space when no gym-like space exists,
+# carrying real bounds for downstream consumers
+
+def test_action_space_from_spec_carries_bounds():
+    env = StandardizeWrapper(DMControlMockEnv())
+
+    env.reset()
+
+    assert env.action_space.shape == (DMControlMockEnv.action_dim,)
+    assert np.allclose(np.asarray(env.action_space.low), -1.)
+    assert np.allclose(np.asarray(env.action_space.high), 1.)
+
+# a genuinely raising spec property must not break construction or reset
+
+class RaisingSpecEnv:
+    @property
+    def action_spec(self):
+        raise RuntimeError('spec unavailable')
+
+    def reset(self):
+        return np.zeros(2), {}
+
+    def step(self, action):
+        return np.zeros(2), 0.0, False, False, {}
+
+def test_raising_spec_degrades_gracefully():
+    env = StandardizeWrapper(RaisingSpecEnv())
+
+    obs, info = env.reset()
+
+    assert obs.shape == (2,)
+    assert env.observation_space.shape == (2,)
+    assert env.action_space is None

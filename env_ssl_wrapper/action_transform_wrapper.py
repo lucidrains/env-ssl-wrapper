@@ -6,7 +6,7 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
 
-from .helpers import EnvWrapper, default, exists
+from .helpers import EnvWrapper, default, exists, get_attr
 
 # helpers
 
@@ -43,21 +43,21 @@ def rescale(
 def action_bounds(env):
     # canonical per-env bounds — gymnasium spaces, or dm_control action_spec
 
-    space = getattr(env, 'action_space', None)
+    space = get_attr(env, 'action_space')
 
-    if space is not None:
-        if hasattr(space, 'n'):
+    if exists(space):
+        if exists(get_attr(space, 'n')):
             return None  # discrete — nothing to rescale
 
         low, high = space.low, space.high
 
     else:
-        action_spec = getattr(env, 'action_spec', None)
+        spec_fn = get_attr(env, 'action_spec')
 
-        if not callable(action_spec):
+        if not callable(spec_fn):
             return None
 
-        spec = action_spec()
+        spec = spec_fn()
         low, high = spec.minimum, spec.maximum
 
     return np.asarray(low, dtype = float), np.asarray(high, dtype = float)

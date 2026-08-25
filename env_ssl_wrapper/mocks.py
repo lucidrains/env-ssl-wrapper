@@ -120,6 +120,14 @@ class MockEnv:
         return Space((self.action_dim,), -1., 1.)
 
     @property
+    def single_action_space(self):
+        # gymnasium convention: vector envs expose the unbatched space,
+        # single envs omit the attribute entirely
+        if not self.is_vector:
+            raise AttributeError('single envs do not have single_action_space')
+        return self.action_space
+
+    @property
     def is_vector(self):
         return False
 

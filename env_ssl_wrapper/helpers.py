@@ -15,6 +15,38 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def get_attr(obj, name, default = None):
+    # the one safe attribute read — properties that raise count as missing,
+    # keeping lookups safe across sims with quirky surfaces
+
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+def truthy_attr(value):
+    # flags arrive in every flavor — None, methods, numpy scalars / arrays.
+    # only honest, non-callable truths count; anything ambiguous is False
+
+    if not exists(value) or callable(value):
+        return False
+
+    try:
+        return bool(value)
+    except Exception:
+        return False
+
+def first_existing(obj, *names):
+    # first attribute that resolves to something, in priority order
+
+    for name in names:
+        value = get_attr(obj, name)
+
+        if exists(value):
+            return value
+
+    return None
+
 def is_scalar(v):
     return isinstance(v, (int, float, bool, np.number, np.bool_))
 
