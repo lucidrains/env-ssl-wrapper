@@ -173,6 +173,7 @@ def test_time_limit_single():
         obs, reward, terminated, truncated, info = env.step(np.zeros((1, 2)))
         if truncated:
             saw_truncated = True
+            assert 'final_observation' in info
         if env.all_done:
             break
 

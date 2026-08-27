@@ -5,21 +5,20 @@ import torch
 from torch import is_tensor
 
 from .auto_batched_wrapper import is_vectorized
-from .helpers import EnvWrapper, dones_of, exists, first_existing, get_attr
+from .helpers import (
+    EnvWrapper,
+    dones_of,
+    exists,
+    first_existing,
+    get_attr,
+    mark_terminal_obs,
+)
 from .spaces import infer_observation_space, space_from_action_spec
 
 # helper functions
 
 def is_time_step(out):
     return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
-
-def any_true(x):
-    # truthiness of any element — torch stays on-device, everything else
-    # (numpy, scalars, foreign array-likes) reduces through numpy
-
-    if is_tensor(x):
-        return bool(x.any())
-    return bool(np.asarray(x).any())
 
 def zero_like(x):
     # per-shape zero of a done leaf: bool arrays for vectorized slots, False
@@ -122,14 +121,6 @@ class StandardizeWrapper(EnvWrapper):
         info = info if isinstance(info, dict) else {}
 
         dones = dones_of(terminated, truncated)
-
-        # final_observation is only injected for single envs, where the post-step
-        # obs is the true terminal obs. for vector envs the post-step obs is
-        # unreliable (garbage for non-autoreset sims, fresh post-reset obs for
-        # autoreset sims) — EpisodePaddingWrapper owns it there
-
-        if 'final_observation' not in info and not self.is_vector and any_true(dones):
-            info['final_observation'] = obs
-            info['_final_observation'] = True
+        mark_terminal_obs(info, obs, dones, self.is_vector)
 
         return obs, reward, terminated, truncated, info

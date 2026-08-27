@@ -59,10 +59,30 @@ def to_numpy(t):
 
     return t.detach().cpu().numpy() if is_tensor(t) else np.asarray(t)
 
+def any_true(x):
+    # truthiness of any element — torch stays on-device, everything else
+    # (numpy, scalars, foreign array-likes) reduces through numpy
+
+    if is_tensor(x):
+        return bool(x.any())
+    return bool(np.asarray(x).any())
+
 def dones_of(terminated, truncated):
     # union of terminated and truncated, pytree-preserving
 
     return tree_map(lambda a, b: a | b, terminated, truncated)
+
+def mark_terminal_obs(info, obs, dones, is_vector):
+    # the single-env terminal contract: on any done transition — natural
+    # termination, the env's own truncation, or a time-limit cap — the
+    # post-step obs is the true terminal obs, so it is attached as
+    # final_observation. vector envs are EpisodePaddingWrapper's job: the
+    # post-step obs there is unreliable (fresh post-reset obs for autoreset
+    # sims, garbage for non-autoreset ones)
+
+    if not is_vector and isinstance(info, dict) and 'final_observation' not in info and any_true(dones):
+        info['final_observation'] = obs
+        info['_final_observation'] = True
 
 class EnvWrapper:
     # base for all wrappers — delegates anything not defined here to the

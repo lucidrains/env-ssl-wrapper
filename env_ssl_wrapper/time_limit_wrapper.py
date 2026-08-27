@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from torch import is_tensor
 
-from .helpers import EnvWrapper, to_numpy
+from .auto_batched_wrapper import is_vectorized
+from .helpers import EnvWrapper, dones_of, mark_terminal_obs, to_numpy
 from .standardize_wrapper import normalize_reset_out, normalize_step_out
 
 def back_to_like(t, numpy_arr):
@@ -32,6 +33,7 @@ class TimeLimitWrapper(EnvWrapper):
     def __init__(self, env, max_timesteps):
         super().__init__(env)
         self.max_timesteps = max_timesteps
+        self.is_vector = is_vectorized(env)
         self.num_envs = getattr(env, 'num_envs', 1)
         self.t = np.zeros(self.num_envs, dtype = int)
 
@@ -51,6 +53,11 @@ class TimeLimitWrapper(EnvWrapper):
 
         capped = self.t >= self.max_timesteps
         truncated_np = truncated_np | (capped & ~terminated_np)
+
+        # a cap is a done transition like any other — the shared terminal-obs
+        # rule attaches the true terminal obs, matching natural terminations
+
+        mark_terminal_obs(info, obs, dones_of(terminated_np, truncated_np), self.is_vector)
 
         # timers reset for envs that ended, so the next episode starts fresh
 
