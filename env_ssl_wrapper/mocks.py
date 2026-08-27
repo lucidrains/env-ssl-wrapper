@@ -74,18 +74,10 @@ class FakePhysics:
         return np.zeros((height, width, 3), dtype = np.uint8)
 
 class FakePyBullet:
-    # pybullet — p.getCameraImage(width, height, renderer) -> (w, h, rgba, depth, segmask)
+    # pybullet — p.getCameraImage(width, height, renderer) -> (w, h, rgba, depth, segmask).
+    # note: the real pybullet module has no seed API — physics is deterministic,
+    # envs seed themselves (numpy / initial states) through their own seed()
     ER_TINY_RENDERER = 3
-
-    def __init__(self):
-        self.last_seed = None
-        self.env = None
-
-    def setSeed(self, seed):
-        self.last_seed = seed
-
-        if self.env is not None:
-            self.env.seed(seed)
 
     def getCameraImage(self, width, height, renderer = None):
         rgba = np.zeros((height, width, 4), dtype = np.uint8)
@@ -220,7 +212,6 @@ class PyBulletMockEnv(LegacyGymMockEnv):
     def __init__(self, seed = 0):
         super().__init__(seed)
         self.p = FakePyBullet()
-        self.p.env = self
 
     def render(self, mode = 'rgb_array'):
         return np.zeros((64, 64, 3), dtype = np.uint8)

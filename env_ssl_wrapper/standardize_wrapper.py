@@ -90,15 +90,13 @@ class StandardizeWrapper(EnvWrapper):
         return obs, info
 
     def seed(self, seed):
-        # canonical seeding across sims:
-        # pybullet -> p.setSeed, dm_control -> task._random.seed,
-        # gymnasium (incl. vector) -> reset(seed = ...), robosuite -> env.seed(seed)
-
-        client = get_attr(self.env, 'p')
-
-        if exists(client) and callable(get_attr(client, 'setSeed')):
-            client.setSeed(seed)
-            return
+        # canonical seeding across sims — one path per dialect protocol:
+        # dm_control -> task._random.seed (its API has no gym protocol),
+        # gymnasium (incl. vector) -> reset(seed = ...),
+        # legacy gym / pybullet_envs / robosuite -> env.seed(seed).
+        # pybullet itself has no seed API — physics is deterministic, all
+        # randomness lives in the env, so the legacy gym seed() protocol
+        # IS the standardized interface for it
 
         random_state = get_attr(get_attr(self.env, 'task'), '_random')
 

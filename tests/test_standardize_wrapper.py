@@ -164,9 +164,14 @@ def test_vectorized_detection():
 # canonical seeding across sims
 
 def test_seed_pybullet():
+    # pybullet has no seed API — standardize routes seeding through the
+    # reset(seed = ...) / env.seed() fallbacks, reproducing trajectories
     env = StandardizeWrapper(PyBulletMockEnv())
     env.seed(42)
-    assert env.unwrapped.p.last_seed == 42
+    obs_a, info = env.reset()
+    env.seed(42)
+    obs_b, info = env.reset()
+    assert np.array_equal(obs_a, obs_b)
 
 def test_seed_dm_control_deterministic():
     env = StandardizeWrapper(DMControlMockEnv())

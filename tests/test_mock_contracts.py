@@ -170,8 +170,9 @@ def test_legacy_interface():
 
 def test_pybullet_interface():
     env = PyBulletMockEnv(seed = 0)
-    env.p.setSeed(42)
-    assert env.p.last_seed == 42
+    # real pybullet has no p.setSeed — env-side seeding via env.seed()
+    env.seed(42)
+    assert env.rng is not None
     assert env.render(mode = 'rgb_array').shape == (64, 64, 3)
 
 def test_dm_control_interface():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gymnasium as gym
+import numpy as np
 import pytest
 import torch
 from torch import is_tensor
@@ -81,6 +82,61 @@ def reacher():
     except Exception:
         return gym.make('Reacher-v4')
 
+# pybullet — genuine bullet3 physics speaking the legacy pybullet-gym dialect:
+# obs-only reset, 4-tuple step, gym spaces. pybullet has no seed API (physics
+# is deterministic), so the env follows the legacy gym protocol: seed() seeds
+# its internal np_random, from which initial states are drawn
+
+class PyBulletCartpoleEnv:
+    def __init__(self, seed = 0):
+        import pybullet as p
+        import pybullet_data
+
+        self.p = p
+        self.client = p.connect(p.DIRECT)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        self.action_space = gym.spaces.Box(-1, 1, (1,), dtype = np.float32)
+        self.seed(seed)
+        self.reset()
+
+    def seed(self, seed):
+        self.np_random = np.random.RandomState(seed)
+
+    def _load(self):
+        p = self.p
+        p.resetSimulation()
+        p.setGravity(0, 0, -9.8)
+        p.setTimeStep(1 / 60)
+        self.body = p.loadURDF('cartpole.urdf')
+        p.resetBasePositionAndOrientation(self.body, [0, 0, 0], [0, 0, 0, 1])
+        p.resetJointState(self.body, 1, self.np_random.uniform(0.05, 0.15))
+        # the pole hinge must swing freely — pybullet motorizes joints by default
+        p.setJointMotorControl2(self.body, 1, p.VELOCITY_CONTROL, targetVelocity = 0, force = 0)
+
+    def reset(self):
+        self._load()
+        return self.obs()
+
+    def obs(self):
+        p = self.p
+        cart_pos, cart_vel = p.getJointState(self.body, 0)[:2]
+        pole_angle, pole_vel = p.getJointState(self.body, 1)[:2]
+        pole_angle = (pole_angle + np.pi) % (2 * np.pi) - np.pi
+        return np.array([cart_pos, cart_vel, np.sin(pole_angle), np.cos(pole_angle), pole_vel], dtype = np.float32)
+
+    def step(self, action):
+        p = self.p
+        action = float(np.asarray(action).reshape(-1)[0])
+        p.setJointMotorControl2(self.body, 0, p.VELOCITY_CONTROL, targetVelocity = action * 10.0, force = 1000.0)
+        p.stepSimulation()
+        obs = self.obs()
+        fallen = abs(obs[2]) > 0.2 or abs(obs[0]) > 2.4
+        return obs, 1.0, bool(fallen), {}
+
+def pybullet_cartpole():
+    pytest.importorskip('pybullet')
+    return PyBulletCartpoleEnv(seed = 0)
+
 # gymnasium-robotics — goal-conditioned robotics (fetch, hand, maze).
 # registration API differs across versions (register_envs < 1.4, register_robotics_envs >= 1.4)
 
@@ -139,6 +195,7 @@ ENVS = [
     cartpole, cartpole_vec, pendulum, mountaincar, mountaincar_continuous, acrobot,
     frozenlake, taxi, blackjack,
     halfcheetah, ant, walker2d, reacher,
+    pybullet_cartpole,
     fetch_reach, fetch_push, fetch_pick_and_place, fetch_slide, hand_reach, point_maze, ant_maze,
     dmc_reacher, dmc_cartpole_swingup, dmc_cheetah
 ]
@@ -247,3 +304,40 @@ def test_real_env_rollout(env_fn):
 
     assert env.episode_lengths.shape == (num_envs,)
     assert (env.episode_lengths > 0).all()
+
+# pybullet — the legacy 4-tuple step is bridged into the canonical 5-tuple,
+# final_observation is injected, and seeding is standardized via the legacy
+# gym seed() protocol
+
+def test_pybullet_cartpole_standardize_and_seed():
+    pytest.importorskip('pybullet')
+
+    env = compose_env(
+        PyBulletCartpoleEnv(seed = 0),
+        ('tensor', dict(device = 'cpu')),
+        'done_tracker'
+    )
+
+    obs, info = env.reset()
+    assert is_tensor(obs) and obs.shape == (1, 5)
+
+    done_seen = False
+
+    for _ in range(300):
+        obs, _, terminated, truncated, info = env.step(torch.zeros(1, 1))
+        assert terminated.dtype == torch.bool
+        assert truncated.dtype == torch.bool
+
+        if terminated:
+            done_seen = True
+            assert 'final_observation' in info
+            break
+
+    assert done_seen
+
+    # standardized seeding — same seed, same initial state, same trajectory
+    env.seed(42)
+    obs_a, _ = env.reset()
+    env.seed(42)
+    obs_b, _ = env.reset()
+    assert torch.equal(obs_a, obs_b)
