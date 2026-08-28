@@ -4,8 +4,7 @@ import numpy as np
 import torch
 from torch import is_tensor
 
-from .auto_batched_wrapper import is_vectorized
-from .helpers import EnvWrapper, dones_of, mark_terminal_obs, to_numpy
+from .helpers import EnvWrapper, dones_of, env_num_envs, is_vectorized, mark_terminal_obs, to_numpy
 from .standardize_wrapper import normalize_reset_out, normalize_step_out
 
 def back_to_like(t, numpy_arr):
@@ -34,7 +33,7 @@ class TimeLimitWrapper(EnvWrapper):
         super().__init__(env)
         self.max_timesteps = max_timesteps
         self.is_vector = is_vectorized(env)
-        self.num_envs = getattr(env, 'num_envs', 1)
+        self.num_envs = env_num_envs(env)
         self.t = np.zeros(self.num_envs, dtype = int)
 
     def reset(self, **kwargs):

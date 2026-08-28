@@ -4,10 +4,14 @@ import numpy as np
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 
-# shared leaf helpers — every wrapper layer treats observation / reward / done
-# leaves uniformly across four types: torch tensors, numpy arrays, python
-# scalars, and foreign array-likes (e.g. jax.Array) that normalize through the
-# numpy __array__ protocol
+# shared helpers, in two halves —
+#   leaf helpers: every wrapper layer treats observation / reward / done
+#     leaves uniformly across four types: torch tensors, numpy arrays, python
+#     scalars, and foreign array-likes (e.g. jax.Array) that normalize through
+#     the numpy __array__ protocol
+#   capability probes: envs answer the same questions in every dialect; each
+#     probe resolves one question across the full spread, so wrapper code asks
+#     by name instead of poking at attributes
 
 def exists(v):
     return v is not None
@@ -71,6 +75,105 @@ def dones_of(terminated, truncated):
     # union of terminated and truncated, pytree-preserving
 
     return tree_map(lambda a, b: a | b, terminated, truncated)
+
+# environment capability probes
+
+def env_num_envs(env) -> int:
+    # how many envs this env batches — single envs, and sims that lazily
+    # report num_envs = None before init, count as one
+
+    try:
+        return max(int(get_attr(env, 'num_envs')), 1)
+    except (TypeError, ValueError):
+        return 1
+
+def env_autoresets(env) -> bool:
+    # whether a vector env resets terminated slots on its own, returning the
+    # fresh post-reset obs for them on the same step. detection covers every
+    # dialect:
+    #   - `autoreset_mode` (older gymnasium / gym 0.21+ / isaac-style)
+    #   - a duck-typed `autoresets` flag on custom vector envs
+    #   - gymnasium vector envs — 1.x removed the marker, and they always
+    #     autoreset there. the isinstance check sees through wrapper chains
+
+    if truthy_attr(first_existing(env, 'autoreset_mode', 'autoresets', 'autoreset')):
+        return True
+
+    try:
+        from gymnasium import vector as gymnasium_vector
+    except ImportError:
+        return False
+
+    curr = env
+    while exists(curr):
+        if isinstance(curr, gymnasium_vector.VectorEnv):
+            return True
+        curr = get_attr(curr, 'env')
+
+    return False
+
+def env_render_mode(env):
+    # the declared render mode; a missing one means the env renders through
+    # its own custom path, an explicit None means it cannot render at all
+
+    return get_attr(env, 'render_mode', 'custom')
+
+def env_render(env, height, width, camera = None):
+    # the sim's image surface, or None — dm_control renders through
+    # physics.render, pybullet through p.getCameraImage (returning
+    # (w, h, rgba, depth, segmask)), robosuite through sim.render; each
+    # carries its own camera kwarg
+
+    physics = get_attr(env, 'physics')
+    if exists(physics) and callable(get_attr(physics, 'render')):
+        kwargs = dict(camera_id = camera) if exists(camera) else {}
+        return physics.render(height = height, width = width, **kwargs)
+
+    client = get_attr(env, 'p')
+    if exists(client) and callable(get_attr(client, 'getCameraImage')):
+        _, _, rgba, _, _ = client.getCameraImage(width, height, renderer = client.ER_TINY_RENDERER)
+        return rgba[..., :3]
+
+    sim = get_attr(env, 'sim')
+    if exists(sim) and callable(get_attr(sim, 'render')):
+        kwargs = dict(camera_name = camera) if exists(camera) else {}
+        return sim.render(height = height, width = width, **kwargs)
+
+    return None
+
+def is_vectorized(env) -> bool:
+    # envs advertise vectorization in every dialect — booleans, methods,
+    # None, numpy scalars — so every probe here tolerates the full spread
+
+    if truthy_attr(get_attr(env, 'is_vector')):
+        return True
+
+    if env_num_envs(env) > 1:
+        return True
+
+    # maniskill — gymnasium-compliant but always batched, even at num_envs = 1;
+    # exposes single_action_space like a vector env, and returns batched tensors
+
+    if exists(get_attr(env, 'single_action_space')):
+        return True
+
+    # an AutoBatchedWrapper counts as vectorized even with is_vector
+    # overridden — its class marker saves the probe an import; the walk
+    # also sees through wrapper chains
+
+    curr = env
+    while exists(curr):
+        if truthy_attr(get_attr(curr, 'is_auto_batched')):
+            return True
+        if truthy_attr(get_attr(curr, 'is_vector')):
+            return True
+        curr = get_attr(curr, 'env')
+
+    try:
+        from gymnasium.vector import VectorEnv
+        return isinstance(env, VectorEnv)
+    except ImportError:
+        return False
 
 def mark_terminal_obs(info, obs, dones, is_vector):
     # the single-env terminal contract: on any done transition — natural

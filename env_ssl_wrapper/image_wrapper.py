@@ -6,7 +6,7 @@ import numpy as np
 
 from einops import rearrange
 
-from .helpers import EnvWrapper, exists
+from .helpers import EnvWrapper, env_render, env_render_mode, exists
 from .standardize_wrapper import normalize_reset_out, normalize_step_out
 
 # helper functions
@@ -15,48 +15,16 @@ def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
 
 def render_frame(env, image_size = (64, 64), camera = None):
-    # render from any sim — each probes its own image surface:
-    # dm_control -> physics.render, pybullet -> p.getCameraImage,
-    # robosuite -> sim.render, gymnasium-style -> env.render()
+    # render from any sim — the shared env_render probe knows each image
+    # surface (dm_control physics, pybullet client, robosuite sim); envs
+    # without one fall back to the gymnasium render() contract
 
     height, width = cast_tuple(image_size, 2)
 
-    img = None
-
-    # dm_control
-
-    physics = getattr(env, 'physics', None)
-
-    if not exists(img) and exists(physics) and callable(getattr(physics, 'render', None)):
-        kwargs = dict(height = height, width = width)
-        if exists(camera):
-            kwargs['camera_id'] = camera
-
-        img = physics.render(**kwargs)
-
-    # pybullet — getCameraImage returns (w, h, rgba, depth, segmask)
-
-    client = getattr(env, 'p', None)
-
-    if not exists(img) and exists(client) and callable(getattr(client, 'getCameraImage', None)):
-        _, _, rgba, _, _ = client.getCameraImage(width, height, renderer = client.ER_TINY_RENDERER)
-        img = rgba[..., :3]
-
-    # robosuite
-
-    sim = getattr(env, 'sim', None)
-
-    if not exists(img) and exists(sim) and callable(getattr(sim, 'render', None)):
-        kwargs = dict(height = height, width = width)
-        if exists(camera):
-            kwargs['camera_name'] = camera
-
-        img = sim.render(**kwargs)
-
-    # gymnasium-style
+    img = env_render(env, height, width, camera)
 
     if not exists(img):
-        if getattr(env, 'render_mode', 'custom') is None:
+        if env_render_mode(env) is None:
             raise ValueError(
                 'env must be created with render_mode = "rgb_array", '
                 'e.g. gym.make(id, render_mode = "rgb_array")'

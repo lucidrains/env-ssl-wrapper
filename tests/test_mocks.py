@@ -30,6 +30,7 @@ from env_ssl_wrapper.mocks import (
 )
 
 from env_ssl_wrapper.done_tracker_wrapper import get_batch_size
+from env_ssl_wrapper.helpers import env_num_envs
 
 MOCKS = [
     GymnasiumMockEnv(),
@@ -62,7 +63,7 @@ def sample_actions(batch_size, action_space):
 
 @pytest.mark.parametrize('env', MOCKS, ids = lambda env: type(env).__name__)
 def test_mock_through_full_pipeline(env):
-    num_envs = getattr(env, 'num_envs', 1)
+    num_envs = env_num_envs(env)
 
     env = compose_env(
         env,
@@ -111,7 +112,7 @@ def test_mock_explicit_standardize_no_duplicate(env):
     obs, info = env.reset()
 
     for _ in range(20):
-        batch_size = env.num_envs if hasattr(env, 'num_envs') else 1
+        batch_size = env_num_envs(env)
         actions = sample_actions(batch_size, env.action_space)
         obs, reward, terminated, truncated, info = env.step(actions)
 
@@ -120,7 +121,7 @@ def test_mock_explicit_standardize_no_duplicate(env):
 
 @pytest.mark.parametrize('env', MOCKS, ids = lambda env: type(env).__name__)
 def test_torch_actions_received(env):
-    num_envs = getattr(env, 'num_envs', 1)
+    num_envs = env_num_envs(env)
     is_vector = getattr(env, 'is_vector', False)
     is_discrete = hasattr(env.action_space, 'n')
 
@@ -169,7 +170,7 @@ def test_torch_actions_received_directly(env):
 
 @pytest.mark.parametrize('env', MOCKS, ids = lambda env: type(env).__name__)
 def test_mock_consumes_actions_in_dynamics(env):
-    num_envs = getattr(env, 'num_envs', 1)
+    num_envs = env_num_envs(env)
 
     env = compose_env(
         env,

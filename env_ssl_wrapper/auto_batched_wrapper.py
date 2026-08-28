@@ -7,42 +7,10 @@ import torch
 from torch.utils._pytree import tree_map
 from einops import rearrange
 
-from .helpers import EnvWrapper, default, exists, first_existing, get_attr, is_array, is_scalar, is_tensor, truthy_attr
+from .helpers import EnvWrapper, default, exists, first_existing, get_attr, is_array, is_scalar, is_tensor, is_vectorized
 from .spaces import space_from_action_spec
 
 # helper functions
-
-def is_vectorized(env) -> bool:
-    # envs advertise vectorization in every dialect — booleans, methods,
-    # None, numpy scalars — so every probe here tolerates the full spread
-
-    if truthy_attr(get_attr(env, 'is_vector')):
-        return True
-
-    num_envs = get_attr(env, 'num_envs')
-
-    if truthy_attr(num_envs) and num_envs > 1:
-        return True
-
-    # maniskill — gymnasium-compliant but always batched, even at num_envs = 1;
-    # exposes single_action_space like a vector env, and returns batched tensors
-
-    if exists(get_attr(env, 'single_action_space')):
-        return True
-
-    curr = env
-    while exists(curr):
-        if isinstance(curr, AutoBatchedWrapper):
-            return True
-        if truthy_attr(get_attr(curr, 'is_vector')):
-            return True
-        curr = get_attr(curr, 'env')
-
-    try:
-        from gymnasium.vector import VectorEnv
-        return isinstance(env, VectorEnv)
-    except ImportError:
-        return False
 
 def to_numeric_array(t):
     # normalize one leaf to torch / numpy — bare numbers, sequences of
@@ -234,6 +202,11 @@ def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = F
 # classes
 
 class AutoBatchedWrapper(EnvWrapper):
+    # marker for the is_vectorized probe (helpers) — an already-batched
+    # wrapper counts as vectorized even when its own is_vector was overridden
+
+    is_auto_batched = True
+
     def __init__(self, env, is_vector: bool | None = None):
         super().__init__(env)
         self.is_vector = default(is_vector, is_vectorized(env))

@@ -4,8 +4,16 @@ import numpy as np
 
 from torch.utils._pytree import tree_flatten
 
-from .auto_batched_wrapper import AutoBatchedWrapper, is_vectorized
-from .helpers import EnvWrapper, dones_of, exists, to_numpy
+from .auto_batched_wrapper import AutoBatchedWrapper
+from .helpers import (
+    EnvWrapper,
+    dones_of,
+    env_autoresets,
+    env_num_envs,
+    exists,
+    is_vectorized,
+    to_numpy,
+)
 
 # helper functions
 
@@ -26,7 +34,12 @@ class DoneTrackerWrapper(EnvWrapper):
             env = AutoBatchedWrapper(env)
 
         super().__init__(env)
-        self.num_envs = getattr(env, 'num_envs', 1)
+        self.num_envs = env_num_envs(env)
+
+        # whether the underlying env resets terminated slots on its own
+        # (gymnasium-style autoreset) - exposed so consumers can tell apart
+        # transient done flags from terminal states
+        self.autoreset = env_autoresets(env)
 
         self.is_done = np.zeros(self.num_envs, dtype = bool)
         self.episode_lengths = np.zeros(self.num_envs, dtype = int)

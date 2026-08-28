@@ -6,6 +6,40 @@ import gymnasium as gym
 import pytest
 
 from env_ssl_wrapper import DoneTrackerWrapper, AutoBatchedWrapper, compose_env
+from env_ssl_wrapper.mocks import AutoresetVectorMockEnv, PufferVectorMockEnv
+
+def test_done_tracker_detects_autoreset():
+    # gymnasium vector envs carry autoreset_mode; custom vector envs mark
+    # themselves with a duck-typed autoresets flag - DoneTrackerWrapper must
+    # expose the underlying autoreset contract so consumers can tell transient
+    # done flags from terminal states
+    gym_env = DoneTrackerWrapper(gym.make_vec('CartPole-v1', num_envs = 2))
+    assert gym_env.autoreset
+
+    autoreset_mock = DoneTrackerWrapper(AutoresetVectorMockEnv())
+    assert autoreset_mock.autoreset
+
+    non_autoreset_mock = DoneTrackerWrapper(PufferVectorMockEnv())
+    assert not non_autoreset_mock.autoreset
+
+    single_env = DoneTrackerWrapper(gym.make('CartPole-v1'))
+    assert not single_env.autoreset
+
+class _DuckAutoresetEnv:
+    num_envs = 2
+    is_vector = True
+    autoresets = True
+
+    def reset(self, **kwargs):
+        return np.zeros((2, 2)), {}
+
+    def step(self, action):
+        return np.zeros((2, 2)), np.ones(2), np.zeros(2, dtype = bool), np.zeros(2, dtype = bool), {}
+
+def test_done_tracker_duck_typed_autoresets_flag():
+    env = DoneTrackerWrapper(_DuckAutoresetEnv())
+    assert env.autoreset
+
 
 def test_done_tracker_auto_batch_single_env():
     raw_env = gym.make('CartPole-v1')

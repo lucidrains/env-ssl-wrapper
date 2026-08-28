@@ -4,13 +4,13 @@ import numpy as np
 import torch
 from torch import is_tensor
 
-from .auto_batched_wrapper import is_vectorized
 from .helpers import (
     EnvWrapper,
     dones_of,
     exists,
     first_existing,
     get_attr,
+    is_vectorized,
     mark_terminal_obs,
 )
 from .spaces import infer_observation_space, space_from_action_spec

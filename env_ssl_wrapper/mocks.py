@@ -261,6 +261,7 @@ class IsaacMockEnv(MockEnv):
 class AutoresetVectorMockEnv(MockEnv):
     num_envs = 4
     is_vector = True
+    autoresets = True
 
     def step(self, action):
         self.advance(action)

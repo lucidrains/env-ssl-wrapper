@@ -541,7 +541,7 @@ def test_wrapper_delegation_and_private_guard():
 # is_vectorized sees through wrapper chains
 
 def test_is_vectorized_wrapped_envs():
-    from env_ssl_wrapper.auto_batched_wrapper import is_vectorized
+    from env_ssl_wrapper.helpers import is_vectorized
     from env_ssl_wrapper.mocks import GymnasiumMockEnv, IsaacMockEnv, RobosuiteMockEnv
 
     assert not is_vectorized(StandardizeWrapper(RobosuiteMockEnv()))

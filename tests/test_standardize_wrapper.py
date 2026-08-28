@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from env_ssl_wrapper import StandardizeWrapper
-from env_ssl_wrapper.auto_batched_wrapper import is_vectorized
+from env_ssl_wrapper.helpers import is_vectorized
 from env_ssl_wrapper.mocks import (
     GymnasiumMockEnv,
     LegacyGymMockEnv,

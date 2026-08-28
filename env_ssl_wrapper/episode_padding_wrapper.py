@@ -7,8 +7,7 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 
-from .auto_batched_wrapper import is_vectorized
-from .helpers import EnvWrapper, dones_of, exists, to_numpy
+from .helpers import EnvWrapper, dones_of, exists, is_vectorized, to_numpy
 
 # helper functions
 

@@ -3,7 +3,8 @@ from functools import partial
 
 from .standardize_wrapper import StandardizeWrapper
 from .image_wrapper import ImageObservationWrapper
-from .auto_batched_wrapper import AutoBatchedWrapper, is_vectorized
+from .auto_batched_wrapper import AutoBatchedWrapper
+from .helpers import is_vectorized
 from .tensor_wrapper import TensorWrapper
 from .action_transform_wrapper import ActionTransformWrapper
 from .done_tracker_wrapper import DoneTrackerWrapper
