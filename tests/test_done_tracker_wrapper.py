@@ -135,13 +135,31 @@ def test_done_tracker_needs_reset_error():
 
 # active-mask bookkeeping — the exposed properties track partial terminations
 
+class _StaggeredEnv:
+    # 4 envs finishing at steps 10 / 20 / 30 / 40 — exactly one env done
+    # after the first termination, deterministically
+
+    num_envs = 4
+    is_vector = True
+
+    def __init__(self):
+        self.per_env_max = np.array([10, 20, 30, 40])
+        self.t = np.zeros(4, dtype = int)
+
+    def reset(self, **kwargs):
+        self.t = np.zeros(4, dtype = int)
+        return np.zeros((4, 2)), {}
+
+    def step(self, action):
+        self.t += 1
+        return np.zeros((4, 2)), np.ones(4), self.t >= self.per_env_max, np.zeros(4, dtype = bool), {}
+
 def test_done_tracker_properties():
-    raw = gym.make_vec('CartPole-v1', num_envs = 4)
-    env = DoneTrackerWrapper(raw)
+    env = DoneTrackerWrapper(_StaggeredEnv())
     env.reset()
 
     while not env.is_done.any():
-        obs, reward, terminated, truncated, info = env.step(raw.action_space.sample())
+        obs, reward, terminated, truncated, info = env.step(np.zeros(4))
 
     assert env.num_active == 3
     assert env.active_mask.sum() == 3

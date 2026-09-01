@@ -6,7 +6,8 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
 
-from .helpers import EnvWrapper, default, exists, get_attr
+from .helpers import EnvWrapper, copy_leaf, default, exists, get_attr
+from .spaces import space_from_action_spec
 
 # helpers
 
@@ -16,13 +17,6 @@ def is_float_dtype(t):
     if isinstance(t, np.ndarray):
         return np.issubdtype(t.dtype, np.floating)
     return isinstance(t, float)
-
-def copy(t):
-    if is_tensor(t):
-        return t.clone()
-    if isinstance(t, np.ndarray):
-        return np.copy(t)
-    return t
 
 def clamp(t, min_val, max_val):
     if is_tensor(t):
@@ -41,7 +35,9 @@ def rescale(
     return (t - from_min) / (from_max - from_min) * (to_max - to_min) + to_min
 
 def action_bounds(env):
-    # canonical per-env bounds — gymnasium spaces, or dm_control action_spec
+    # canonical per-env bounds — gymnasium spaces, or dm_control action_spec.
+    # discrete spaces have nothing to rescale; anything else unresolvable
+    # (dict / text spaces, raising specs) counts as unknown, never fatal
 
     space = get_attr(env, 'action_space')
 
@@ -49,18 +45,15 @@ def action_bounds(env):
         if exists(get_attr(space, 'n')):
             return None  # discrete — nothing to rescale
 
-        low, high = space.low, space.high
+        if exists(get_attr(space, 'low')):
+            return np.asarray(space.low, dtype = float), np.asarray(space.high, dtype = float)
 
-    else:
-        spec_fn = get_attr(env, 'action_spec')
+    spec = space_from_action_spec(env)
 
-        if not callable(spec_fn):
-            return None
+    if not exists(spec):
+        return None
 
-        spec = spec_fn()
-        low, high = spec.minimum, spec.maximum
-
-    return np.asarray(low, dtype = float), np.asarray(high, dtype = float)
+    return np.asarray(spec.low, dtype = float), np.asarray(spec.high, dtype = float)
 
 # wrapper
 
@@ -132,7 +125,7 @@ class ActionTransformWrapper(EnvWrapper):
             if not is_float_dtype(t):
                 return t
 
-            t = copy(t)
+            t = copy_leaf(t)
 
             for ind, transform in enumerate(self.transforms):
                 indices = transform.get('indices', ind if len(self.transforms) > 1 else None)

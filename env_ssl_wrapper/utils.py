@@ -27,6 +27,9 @@ WRAPPERS = dict(
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):
+        if wrapper not in WRAPPERS:
+            raise ValueError(f'unknown wrapper {wrapper!r} — choose from {sorted(WRAPPERS)}')
+
         wrapper = WRAPPERS[wrapper]
 
     if isinstance(wrapper, tuple):

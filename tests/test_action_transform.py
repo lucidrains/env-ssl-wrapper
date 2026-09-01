@@ -111,3 +111,37 @@ def test_auto_rescale_dm_control_action_spec():
     env.step(np.array([0.0, 1.0], dtype = np.float32))
 
     assert np.allclose(env.unwrapped.last_action, np.array([-1.0, 1.0]))
+
+# unresolvable bounds (dict / text spaces, raising specs) count as unknown —
+# actions pass through untouched, construction never fails
+
+def test_auto_rescale_unresolvable_spaces_passthrough():
+    import gymnasium as gym
+
+    env = MockEnv()
+    env.action_space = gym.spaces.Dict(
+        joint = gym.spaces.Box(-1, 1, (2,)),
+        gripper = gym.spaces.Box(-1, 1, (1,))
+    )
+
+    wrapper = ActionTransformWrapper(env, auto = True)
+
+    assert wrapper.bounds is None
+
+    wrapper.step(dict(joint = np.array([0.5, 0.5]), gripper = np.array([0.5])))
+
+    assert np.allclose(env.last_action['joint'], np.array([0.5, 0.5]))
+    assert np.allclose(env.last_action['gripper'], np.array([0.5]))
+
+def test_auto_rescale_raising_action_spec_passthrough():
+    class RaisingSpecEnv(MockEnv):
+        def action_spec(self):
+            raise RuntimeError('no spec for you')
+
+    wrapper = ActionTransformWrapper(RaisingSpecEnv(), auto = True)
+
+    assert wrapper.bounds is None
+
+    wrapper.step(np.array([0.5, 0.5], dtype = np.float32))
+
+    assert np.allclose(wrapper.env.last_action, np.array([0.5, 0.5]))

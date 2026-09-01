@@ -7,7 +7,7 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 
-from .helpers import EnvWrapper, dones_of, exists, is_vectorized, to_numpy
+from .helpers import EnvWrapper, copy_leaf, dones_of, exists, is_vectorized, to_numpy
 
 # helper functions
 
@@ -39,13 +39,6 @@ def back_to_mask_type(dones, newly):
     if is_tensor(dones):
         return torch.as_tensor(newly, dtype = torch.bool, device = dones.device)
     return np.asarray(newly, dtype = bool)
-
-def copy_leaf(x):
-    if is_tensor(x):
-        return x.clone()
-    if isinstance(x, np.ndarray):
-        return x.copy()
-    return x
 
 def merge_final(current, value, mask):
     # fold value's slots under mask into the frozen terminal-obs tree

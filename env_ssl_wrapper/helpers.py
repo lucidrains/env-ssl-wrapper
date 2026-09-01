@@ -71,6 +71,18 @@ def any_true(x):
         return bool(x.any())
     return bool(np.asarray(x).any())
 
+def copy_leaf(x):
+    # defensive copy of a leaf — tensors / arrays copied, everything else
+    # (scalars, strings, odd objects) is immutable enough to share
+
+    if is_tensor(x):
+        return x.clone()
+
+    if isinstance(x, np.ndarray):
+        return x.copy()
+
+    return x
+
 def dones_of(terminated, truncated):
     # union of terminated and truncated, pytree-preserving
 
