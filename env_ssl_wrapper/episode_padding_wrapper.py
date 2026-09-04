@@ -6,21 +6,19 @@ import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
+from einops import rearrange
 
 from .helpers import EnvWrapper, copy_leaf, dones_of, exists, is_vectorized, to_numpy
 
-# helper functions
+# helpers
 
 def zero_mask(x, mask, fill_scalar = None):
-    # dtype-preserving padding under mask: floats/ints -> 0, bool -> False.
-    # scalar leaves pass through untouched, unless fill_scalar is given
-    # (used to zero scalar rewards when any slot is masked)
-
     if is_tensor(x):
-        m = torch.as_tensor(mask, dtype = torch.bool, device = x.device)
+        m = torch.as_tensor(mask, device = x.device, dtype = torch.bool)
+        diff = x.ndim - m.ndim
 
-        while m.ndim < x.ndim:
-            m = m.unsqueeze(-1)
+        if diff > 0:
+            m = rearrange(m, f'... -> ... {" ".join(["1"] * diff)}')
 
         return torch.where(m, torch.zeros_like(x), x)
 
@@ -37,17 +35,16 @@ def zero_mask(x, mask, fill_scalar = None):
 
 def back_to_mask_type(dones, newly):
     if is_tensor(dones):
-        return torch.as_tensor(newly, dtype = torch.bool, device = dones.device)
+        return torch.as_tensor(newly, device = dones.device, dtype = torch.bool)
     return np.asarray(newly, dtype = bool)
 
 def merge_final(current, value, mask):
-    # fold value's slots under mask into the frozen terminal-obs tree
-
     if is_tensor(current):
-        m = torch.as_tensor(mask, dtype = torch.bool, device = current.device)
+        m = torch.as_tensor(mask, device = current.device, dtype = torch.bool)
+        diff = current.ndim - m.ndim
 
-        while m.ndim < current.ndim:
-            m = m.unsqueeze(-1)
+        if diff > 0:
+            m = rearrange(m, f'... -> ... {" ".join(["1"] * diff)}')
 
         return torch.where(m, value, current)
 
@@ -63,19 +60,6 @@ def merge_final(current, value, mask):
 # class
 
 class EpisodePaddingWrapper(EnvWrapper):
-    # standardized padding for uneven vectorized episodes: when an env
-    # terminates early, its obs slot is zeroed (floats/ints -> 0, bool -> False)
-    # on the terminating step and every step after, regardless of whether the
-    # env autoresets (Isaac, gymnasium) or keeps stepping (pufferlib, maniskill).
-    # rewards follow the gymnasium convention instead: the terminating step's
-    # reward is the real terminal transition reward and is preserved — only
-    # rewards on steps after termination (frozen env garbage) are zeroed.
-    # info['final_observation'] is standardized too: the true terminal obs
-    # (env-provided pre-reset obs for autoreset sims, else the cached pre-step
-    # obs — never the env's post-termination garbage) is frozen per env and
-    # re-emitted every step while any env stays done, with _final_observation
-    # masking which envs it applies to.
-
     def __init__(self, env):
         super().__init__(env)
         self.is_vector = is_vectorized(env)
@@ -109,7 +93,6 @@ class EpisodePaddingWrapper(EnvWrapper):
                 self._is_done |= mask
 
                 if newly.any():
-                    # true terminal obs: env-provided (autoreset sims) or cached pre-step obs
                     value = info['final_observation'] if 'final_observation' in info else self._last_obs
 
                     if self._final_obs is None:
@@ -118,11 +101,6 @@ class EpisodePaddingWrapper(EnvWrapper):
                         self._final_obs = tree_map(partial(merge_final, mask = newly), self._final_obs, value)
 
                 obs = tree_map(partial(zero_mask, mask = mask), obs)
-
-                # zero rewards only for envs that were already done before this
-                # step - the terminating step's own reward is the real terminal
-                # transition reward and must survive for the return calculation
-
                 reward = zero_mask(reward, mask & ~newly, fill_scalar = 0.0)
 
                 info['final_observation'] = self._final_obs

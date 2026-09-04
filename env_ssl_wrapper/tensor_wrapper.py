@@ -7,15 +7,12 @@ import torch
 from torch import tensor, is_tensor, from_numpy, device as torch_device
 from torch.utils._pytree import tree_map
 
-from .helpers import EnvWrapper, is_scalar
+from .helpers import EnvWrapper, exists, get_attr, is_scalar
 
-# helper functions
+# helpers
 
 def numpy_to_torch(x, device, cast_obs_to_float = True):
-    # numpy / scalars / foreign array-likes (jax) to torch on device;
-    # non-bool leaves are cast to float32 unless disabled.
-    # np.array forces a copy — from_numpy would alias the sim's internal
-    # buffer, silently mutating previously returned obs when it overwrites
+    # numpy / scalars / foreign array-likes to torch; float32 unless disabled
 
     def _to_torch(t):
         if not is_tensor(t):
@@ -23,20 +20,17 @@ def numpy_to_torch(x, device, cast_obs_to_float = True):
                 t = from_numpy(np.array(t))
             elif is_scalar(t):
                 t = tensor(t)
-            elif hasattr(t, '__array__'):
+            elif exists(get_attr(t, '__array__')):
                 t = from_numpy(np.array(t))
             else:
                 return t
 
-        if cast_obs_to_float and t.dtype != torch.bool:
-            t = t.float()
-
-        return t.to(device)
+        dtype = torch.float32 if cast_obs_to_float and t.dtype != torch.bool else t.dtype
+        return t.to(device = device, dtype = dtype)
     return tree_map(_to_torch, x)
 
 def torch_to_numpy(x):
-    # torch / scalars / array-likes to numpy; 0-dim arrays collapse to
-    # scalars, float64 casts to float32
+    # torch to numpy; 0-dim collapses to scalar, float64 → float32
 
     def _to_numpy(t):
         if is_tensor(t):
@@ -55,7 +49,7 @@ def torch_to_numpy(x):
         return t
     return tree_map(_to_numpy, x)
 
-# uniform contract — rewards float32, dones bool
+# rewards float32, dones bool
 
 def contract(t, to_float = False):
     if not is_tensor(t):
@@ -88,7 +82,6 @@ class TensorWrapper(EnvWrapper):
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
     def cast_info(self, info):
-        # terminal-obs bookkeeping follows the same torch contract as the stream
 
         if isinstance(info, dict) and 'final_observation' in info:
             info['final_observation'] = self.cast(info['final_observation'])

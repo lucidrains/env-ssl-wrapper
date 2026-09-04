@@ -4,7 +4,7 @@ from functools import partial
 from .standardize_wrapper import StandardizeWrapper
 from .image_wrapper import ImageObservationWrapper
 from .auto_batched_wrapper import AutoBatchedWrapper
-from .helpers import is_vectorized
+from .helpers import instantiate_env, is_vectorized
 from .tensor_wrapper import TensorWrapper
 from .action_transform_wrapper import ActionTransformWrapper
 from .done_tracker_wrapper import DoneTrackerWrapper
@@ -42,7 +42,9 @@ def parse_wrapper(wrapper):
     cls = wrapper.func if isinstance(wrapper, partial) else wrapper
     return wrapper, cls
 
-def compose_env(env, *wrappers):
+def compose_env(env, *wrappers, pad_episodes: bool = True):
+    env = instantiate_env(env)
+
     funcs = []
     classes = []
 
@@ -55,12 +57,9 @@ def compose_env(env, *wrappers):
         funcs.insert(0, StandardizeWrapper)
         classes.insert(0, StandardizeWrapper)
 
-    # vectorized envs always get standardized episode padding + a persistent
-    # final_observation, so uneven terminations emit zeros/False uniformly.
-    # inserted right after standardize (inside any tensor / flatten wrappers)
-    # so foreign array-like obs (jax) are normalized before the final cast
+    # vectorized envs get standardized episode padding + a persistent final_observation
 
-    if EpisodePaddingWrapper not in classes and is_vectorized(env):
+    if pad_episodes and EpisodePaddingWrapper not in classes and is_vectorized(env):
         funcs.insert(1, EpisodePaddingWrapper)
         classes.insert(1, EpisodePaddingWrapper)
 

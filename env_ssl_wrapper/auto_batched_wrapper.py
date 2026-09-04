@@ -13,10 +13,7 @@ from .spaces import space_from_action_spec
 # helper functions
 
 def to_numeric_array(t):
-    # normalize one leaf to torch / numpy — bare numbers, sequences of
-    # numbers, and foreign array-likes (jax) join tensors and arrays. one
-    # rule decides everything: try numpy, keep it only if numeric — strings,
-    # None, ragged lists, and odd objects all pass through untouched
+    # try numpy, keep only if numeric — strings / None / ragged pass through
 
     if is_array(t):
         return t
@@ -29,8 +26,7 @@ def to_numeric_array(t):
     return arr if arr.dtype.kind in 'biufc' else t
 
 def maybe_expand_dim(x):
-    # every numeric leaf gains a leading batch dim; non-numeric stragglers
-    # (strings in info dicts, odd objects) ride along untouched
+    # add leading batch dim to every numeric leaf
 
     def _expand(t):
         arr = to_numeric_array(t)
@@ -39,7 +35,7 @@ def maybe_expand_dim(x):
             return t
 
         if arr.ndim == 0:
-            return arr.reshape(1)
+            return rearrange(arr, '-> 1')
 
         return rearrange(arr, '... -> 1 ...')
 
@@ -53,30 +49,18 @@ def is_integer_dtype(t):
     return False
 
 def get_action_space(env):
-    # returns (space, from_single_env_space), resolving through a cascade of
-    # ever-weaker signals —
-    # 1. `single_action_space` — vectorized envs describing a single env,
-    #    preferred over an already-batched `action_space`
-    # 2. `action_space` — the gym convention
-    # 3. `action_spec()` — the dm_control convention (bounds + shape)
-    # 4. nothing — actions then fall back to dtype-driven heuristics
+    # resolve (space, is_single) — single_action_space > adapter.action_space
 
     unit_space = first_existing(env, 'single_action_space')
 
     if exists(unit_space):
         return unit_space, True
 
-    space = first_existing(env, 'action_space')
-
-    if exists(space):
-        return space, False
-
-    return space_from_action_spec(env), False
+    from .helpers import get_adapter
+    return get_adapter(env).action_space, False
 
 def action_shape_tree(space):
-    # canonical shapes, parallel to the action structure: Discrete -> (),
-    # Box / MultiDiscrete / MultiBinary -> their shape, Tuple -> list of
-    # subspace trees, Dict -> dict of them, unknown -> None
+    # canonical shapes parallel to action structure
 
     if not exists(space):
         return None
@@ -92,8 +76,7 @@ def action_shape_tree(space):
     return get_attr(space, 'shape')
 
 def squeeze_leaf(t, shape, prepend_batch = False):
-    # reshape one leaf to the canonical (optionally batch-prepended) shape;
-    # discrete leaves collapse to python scalars whatever the backend
+    # reshape leaf to canonical shape, collapsing discrete to scalar
 
     arr = to_numeric_array(t)
 
@@ -113,9 +96,7 @@ def squeeze_leaf(t, shape, prepend_batch = False):
     return arr.item() if arr.ndim == 0 else arr
 
 def heuristic_leaf(t, is_vector = False):
-    # without a known space: drop the leading singleton batch dim, then
-    # collapse integer leaves further — discrete spaces want scalars, while
-    # continuous ones keep their trailing dims
+    # no space known — drop singleton batch, collapse integer leaves to scalar
 
     arr = to_numeric_array(t)
 
@@ -123,39 +104,29 @@ def heuristic_leaf(t, is_vector = False):
         return arr
 
     if not is_vector and arr.ndim > 1 and arr.shape[0] == 1:
-        arr = arr.reshape(arr.shape[1:])       # the leading singleton is the batch dim
+        arr = rearrange(arr, '1 ... -> ...')
 
     if is_integer_dtype(arr):
         while arr.ndim > 1 and arr.shape[-1] == 1:
-            arr = arr.squeeze(-1)
+            arr = rearrange(arr, '... 1 -> ...')
 
         if not is_vector and (arr.numel() if is_tensor(arr) else arr.size) == 1:
-            arr = arr.reshape(())
+            return arr.item()
 
-    # fully collapsed leaves end as python scalars, converging with the
-    # space-driven path whatever the backend
-
-    if arr.ndim == 0:
-        return arr.item()
-
-    return arr
+    return arr.item() if arr.ndim == 0 else arr
 
 def rebuild_container(x, leaves):
-    # lists stay lists, namedtuples splat their fields, plain tuples wrap
 
     if isinstance(x, list):
         return leaves
 
-    if hasattr(type(x), '_fields'):
+    if exists(get_attr(type(x), '_fields')):
         return type(x)(*leaves)
 
     return type(x)(leaves)
 
 def is_numeric_container(x):
-    # purely numeric nested sequences ([[0.5]], ((0, 1),)) count as one leaf
-    # when no space declares structure — spelled differently than their array
-    # twins, not structured differently. tensors never qualify (converting
-    # them would stack tuples into foreign backends), nor do empties or mixes
+    # purely numeric nested sequences count as one leaf when no space declares structure
 
     if isinstance(x, (list, tuple)):
         return len(x) > 0 and all(is_numeric_container(item) for item in x)
@@ -163,14 +134,7 @@ def is_numeric_container(x):
     return is_scalar(x)
 
 def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = False):
-    # actions arrive batched; the env beneath often expects otherwise. when
-    # the action space is known, its canonical shape is ground truth: every
-    # leaf reshapes to it, prepending the batch dim for vectorized envs
-    # (container trees are lists / dicts, leaf shapes are tuples). without a
-    # space, fall back to heuristics
-
-    # every container standardizes onto one walk: children align with
-    # subtrees by position (sequences) or by key (dicts), then rebuild in kind
+    # reshape actions to match the env's space, falling back to heuristics
 
     if isinstance(shape_tree, (list, dict)):
         keyed = isinstance(shape_tree, dict)
@@ -185,14 +149,12 @@ def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = F
 
         return dict(zip(x.keys(), leaves)) if keyed else rebuild_container(x, leaves)
 
-    # a leaf-shaped tree claims the whole input — even bare numbers or
-    # sequences of them
+    # leaf-shaped tree — claims the whole input
 
     if exists(shape_tree):
         return squeeze_leaf(x, shape_tree, prepend_batch)
 
-    # without a declared structure, numeric sequences ride as one leaf so
-    # they shape identically to their array twins; everything else recurses
+    # no declared structure — numeric sequences as one leaf, else recurse
 
     if is_numeric_container(x):
         return heuristic_leaf(x, is_vector)
@@ -202,19 +164,12 @@ def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = F
 # classes
 
 class AutoBatchedWrapper(EnvWrapper):
-    # marker for the is_vectorized probe (helpers) — an already-batched
-    # wrapper counts as vectorized even when its own is_vector was overridden
 
     is_auto_batched = True
 
     def __init__(self, env, is_vector: bool | None = None):
         super().__init__(env)
         self.is_vector = default(is_vector, is_vectorized(env))
-
-        # the action space is ground truth for action shapes. vectorized envs
-        # that describe a single env (`single_action_space`) get the batch dim
-        # prepended at step time; those exposing only a batched space take
-        # actions as-is; unresolvable spaces defer to heuristics
 
         self.refresh_action_space()
 
@@ -226,9 +181,6 @@ class AutoBatchedWrapper(EnvWrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-
-        # some sims only surface their spaces once running — re-probe if the
-        # construction-time lookup came up empty
 
         if not exists(self.action_shape_tree):
             self.refresh_action_space()

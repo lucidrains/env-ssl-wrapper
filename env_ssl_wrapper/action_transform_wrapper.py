@@ -5,8 +5,9 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
+from einops import rearrange
 
-from .helpers import EnvWrapper, copy_leaf, default, exists, get_attr
+from .helpers import EnvWrapper, copy_leaf, default, exists, first_existing, get_attr
 from .spaces import space_from_action_spec
 
 # helpers
@@ -36,14 +37,13 @@ def rescale(
 
 def action_bounds(env):
     # canonical per-env bounds — gymnasium spaces, or dm_control action_spec.
-    # discrete spaces have nothing to rescale; anything else unresolvable
-    # (dict / text spaces, raising specs) counts as unknown, never fatal
+    # discrete spaces have nothing to rescale
 
-    space = get_attr(env, 'action_space')
+    space = first_existing(env, 'single_action_space', 'action_space')
 
     if exists(space):
         if exists(get_attr(space, 'n')):
-            return None  # discrete — nothing to rescale
+            return None
 
         if exists(get_attr(space, 'low')):
             return np.asarray(space.low, dtype = float), np.asarray(space.high, dtype = float)
@@ -95,7 +95,7 @@ class ActionTransformWrapper(EnvWrapper):
         was_scalar = t.ndim == 0
 
         if was_scalar:
-            t = t.reshape(1)
+            t = rearrange(t, '-> 1')
 
         dim = t.shape[-1]
         low = np.broadcast_to(low, (dim,))
@@ -103,10 +103,9 @@ class ActionTransformWrapper(EnvWrapper):
         valid = np.isfinite(low) & np.isfinite(high)
 
         if is_tensor(t):
-            device, dtype = t.device, t.dtype
-            low = torch.tensor(low, dtype = dtype, device = device)
-            high = torch.tensor(high, dtype = dtype, device = device)
-            valid = torch.tensor(valid, device = device)
+            low = torch.tensor(low, device = t.device, dtype = t.dtype)
+            high = torch.tensor(high, device = t.device, dtype = t.dtype)
+            valid = torch.tensor(valid, device = t.device)
 
         rescaled = rescale(t, self.from_range, (low, high))
 
@@ -116,7 +115,7 @@ class ActionTransformWrapper(EnvWrapper):
             rescaled = np.where(valid, np.clip(rescaled, low, high), t)
 
         if was_scalar:
-            rescaled = rescaled.reshape(())
+            rescaled = rearrange(rescaled, '1 ->')
 
         return rescaled
 

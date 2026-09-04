@@ -1,6 +1,6 @@
 # env-ssl-wrapper
 
-One line turns any simulator's environment — gymnasium, dm_control, isaac, maniskill, pybullet, robosuite, pufferlib — into the same torch-native interface.
+One line turns any simulator's environment — mujoco warp, isaac sim, pybullet, gymnasium, pufferlib, dm_control, robosuite — into the same torch-native interface.
 
 ## Install
 
@@ -47,6 +47,66 @@ Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`,
 
 Terminated envs are uniformly padded (zeros / `False` obs; rewards zeroed only after the terminating step, so the terminal transition's reward is never lost), and `info['final_observation']` — the true terminal obs, frozen per env and re-emitted while the env stays done — is always present once any env has terminated, with `info['_final_observation']` masking which envs it applies to. `env.is_done` always reflects the per-env done mask.
 
+### Conforming Janky Simulators
+
+Say you are handed a legacy or custom simulator with completely idiosyncratic signatures — non-standard method names, costs instead of rewards, inverted booleans, and custom rendering:
+
+```python
+class JankyRoboticsSim:
+    def boot(self):
+        return {'sensors': [0.1, -0.5, 1.2]}
+
+    def actuate(self, torque):
+        # returns sensor_dict, cost, is_alive
+        return {'sensors': [0.2, -0.4, 1.1]}, 0.05, True
+
+    def grab_pixels(self, w, h):
+        return np.zeros((h, w, 3), dtype = np.uint8)
+```
+
+Wrap all that idiosyncrasy into an adapter in a few lines:
+
+```python
+import numpy as np
+from env_ssl_wrapper import BaseEnvAdapter, register_adapter, compose_env
+
+class JankySimAdapter(BaseEnvAdapter):
+    @classmethod
+    def matches(cls, env):
+        return isinstance(env, JankyRoboticsSim)
+
+    def reset(self, **kwargs):
+        obs = self.env.boot()
+        return {'sensors': np.asarray(obs['sensors'])}, {}
+
+    def step(self, action):
+        data, cost, is_alive = self.env.actuate(action)
+        return {'sensors': np.asarray(data['sensors'])}, -cost, not is_alive, False, {}
+
+    def render(self, height, width, camera = None):
+        return self.env.grab_pixels(width, height)
+
+register_adapter(JankySimAdapter)
+```
+
+Now it behaves like every first-class simulator in the ecosystem:
+
+```python
+env = compose_env(
+    JankyRoboticsSim(),
+    ('image', dict(image_size = (64, 64))),
+    'auto_batch',
+    'tensor',
+    'done_tracker'
+)
+
+obs, info = env.reset()
+# obs['image']   -> torch.Size([1, 3, 64, 64])
+# obs['sensors'] -> torch.Size([1, 3])
+
+obs, reward, terminated, truncated, info = env.step(torch.randn(1, 1))
+```
+
 ## Mock sims
 
 `env_ssl_wrapper.mocks` ships dependency-free stand-ins emulating each simulator's quirks (`GymnasiumMockEnv`, `IsaacMockEnv`, `DMControlMockEnv`, ...) for testing your code without installing the real sims.
@@ -54,6 +114,18 @@ Terminated envs are uniformly padded (zeros / `False` obs; rewards zeroed only a
 ```python
 from env_ssl_wrapper.mocks import IsaacMockEnv
 env = compose_env(IsaacMockEnv(), 'tensor', 'done_tracker')
+```
+
+## Multiprocessing
+
+Parallelize any single environment or factory into an autoresetting vector env:
+
+```python
+from env_ssl_wrapper import MultiprocessingVecEnv, compose_env
+
+with MultiprocessingVecEnv('CartPole-v1', num_envs = 8) as env:
+    env = compose_env(env, 'tensor', 'done_tracker')
+    obs, info = env.reset()
 ```
 
 ## Tests

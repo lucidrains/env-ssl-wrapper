@@ -4,15 +4,16 @@ import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten
+from einops import rearrange
 
 from .helpers import EnvWrapper, is_array, is_scalar
 
-# helper functions
+# helpers
 
 def flattenable(t):
     if is_array(t) or is_scalar(t):
         return True
-    # foreign array-likes (jax) — string leaves are dropped, not flattened
+
     try:
         return np.asarray(t).dtype.kind not in 'USO'
     except Exception:
@@ -23,17 +24,14 @@ def flatten_leaf(t):
         t = np.asarray(t)
 
     if t.ndim == 0:
-        return t.reshape(1, 1)
+        return rearrange(t, '-> 1 1')
 
     if t.ndim == 1:
-        return t.reshape(-1, 1)
+        return rearrange(t, 'b -> b 1')
 
-    return t.reshape(t.shape[0], -1)
+    return rearrange(t, 'b ... -> b (...)')
 
 def concat_leaves(leaves):
-    # 1-dim leaves are ambiguous — equal lengths stack as columns (already-
-    # batched leaves); differing lengths carry no batch dim (an unbatched
-    # dict obs), so concat along 0
     axis, flatten = -1, True
 
     if leaves[0].ndim == 1 and not all(len(t) == len(leaves[0]) for t in leaves):
@@ -43,6 +41,7 @@ def concat_leaves(leaves):
 
     if is_tensor(leaves[0]):
         return torch.cat(leaves, dim = axis)
+
     return np.concatenate(leaves, axis = axis)
 
 # class

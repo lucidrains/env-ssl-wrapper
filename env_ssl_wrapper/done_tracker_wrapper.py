@@ -11,6 +11,7 @@ from .helpers import (
     env_autoresets,
     env_num_envs,
     exists,
+    get_attr,
     is_vectorized,
     to_numpy,
 )
@@ -24,7 +25,7 @@ def get_batch_size(tree) -> int | None:
         return None
 
     first = leaves[0]
-    return len(first) if hasattr(first, '__len__') else None
+    return len(first) if exists(get_attr(first, '__len__')) else None
 
 # classes
 
@@ -63,7 +64,17 @@ class DoneTrackerWrapper(EnvWrapper):
 
     @property
     def needs_reset(self) -> bool:
+        if self.autoreset:
+            return not self.has_reset
         return not self.has_reset or self.all_done
+
+    def reset_done(self, indices = None):
+        if not exists(indices):
+            self.is_done.fill(False)
+            self.episode_lengths.fill(0)
+        else:
+            self.is_done[indices] = False
+            self.episode_lengths[indices] = 0
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

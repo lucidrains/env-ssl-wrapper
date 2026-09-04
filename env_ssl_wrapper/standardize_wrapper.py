@@ -4,31 +4,20 @@ import numpy as np
 import torch
 from torch import is_tensor
 
+from .adapters import get_adapter, is_time_step, zero_like
 from .helpers import (
     EnvWrapper,
+    default,
     dones_of,
     exists,
     first_existing,
     get_attr,
-    is_vectorized,
+    instantiate_env,
     mark_terminal_obs,
 )
 from .spaces import infer_observation_space, space_from_action_spec
 
-# helper functions
-
-def is_time_step(out):
-    return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
-
-def zero_like(x):
-    # per-shape zero of a done leaf: bool arrays for vectorized slots, False
-    # for scalars, torch for torch
-
-    if is_tensor(x):
-        return torch.zeros_like(x, dtype = torch.bool)
-
-    arr = np.asarray(x)
-    return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
+# helpers
 
 def normalize_reset_out(out):
     if is_time_step(out):
@@ -36,7 +25,7 @@ def normalize_reset_out(out):
 
     if isinstance(out, tuple) and len(out) == 2:
         obs, info = out
-        return obs, {} if info is None else info
+        return obs, {} if info is None else (info if isinstance(info, dict) else {})
 
     return out, {}
 
@@ -49,9 +38,8 @@ def normalize_step_out(out):
         return out
 
     if len(out) in (3, 4):
-        # legacy (obs, reward, done[, info]) — truncation is unknown, zero-filled
         obs, reward, done, *rest = out
-        info = rest[0] if rest else {}
+        info = rest[0] if rest and isinstance(rest[0], dict) else {}
         return obs, reward, done, zero_like(done), info
 
     raise ValueError(f'could not standardize step output of length {len(out)}')
@@ -59,64 +47,43 @@ def normalize_step_out(out):
 # class
 
 class StandardizeWrapper(EnvWrapper):
-    # normalizes any sim's step / reset signatures, vectorization, and
-    # autoreset into the canonical (obs, reward, terminated, truncated, info)
+    # normalizes any sim into (obs, reward, terminated, truncated, info) via its adapter
 
-    def __init__(self, env):
+    def __init__(self, env, adapter = None):
+        env = instantiate_env(env)
         super().__init__(env)
-        self.is_vector = is_vectorized(env)
+        self.adapter = default(adapter, get_adapter(env))
+        self.is_vector = self.adapter.is_vectorized
 
-        # canonical contract — always expose the single-env spaces.
-        # gymnasium >= 1.0 vector envs expose batched spaces (e.g. MultiDiscrete); normalize them away
+        # always expose single-env spaces
 
-        self.action_space = first_existing(env, 'single_action_space', 'action_space')
-        self.observation_space = first_existing(env, 'single_observation_space', 'observation_space')
+        self.action_space = default(
+            self.adapter.action_space,
+            space_from_action_spec(env)
+        )
+        self.observation_space = self.adapter.observation_space
 
     def reset(self, **kwargs):
-        obs, info = normalize_reset_out(self.env.reset(**kwargs))
+        obs, info = self.adapter.reset(**kwargs)
 
-        # spaces that could not be resolved from the env are filled lazily
-        # from the first real observation or an action spec — never overwriting
-        # spaces the env genuinely exposes. until then they stay None; a space
-        # only becomes meaningful once the env is running anyway
+        # lazily fill missing spaces from first real observation
 
         if not exists(self.observation_space):
             self.observation_space = infer_observation_space(obs, self.is_vector)
 
         if not exists(self.action_space):
-            self.action_space = space_from_action_spec(self.env)
+            self.action_space = default(self.adapter.action_space, space_from_action_spec(self.env))
 
         return obs, info
 
     def seed(self, seed):
-        # canonical seeding across sims — one path per dialect protocol:
-        # dm_control -> task._random.seed (its API has no gym protocol),
-        # gymnasium (incl. vector) -> reset(seed = ...),
-        # legacy gym / pybullet_envs / robosuite -> env.seed(seed).
-        # pybullet itself has no seed API — physics is deterministic, all
-        # randomness lives in the env, so the legacy gym seed() protocol
-        # IS the standardized interface for it
+        self.adapter.seed(seed)
 
-        random_state = get_attr(get_attr(self.env, 'task'), '_random')
-
-        if exists(random_state) and callable(get_attr(random_state, 'seed')):
-            random_state.seed(seed)
-            return
-
-        try:
-            self.env.reset(seed = seed)
-            return
-        except TypeError:
-            pass
-
-        if callable(get_attr(self.env, 'seed')):
-            self.env.seed(seed)
-            return
-
-        raise ValueError('cannot seed this environment')
+    def render(self, height = 64, width = 64, camera = None):
+        return self.adapter.render(height = height, width = width, camera = camera)
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
+        obs, reward, terminated, truncated, info = self.adapter.step(action)
 
         info = info if isinstance(info, dict) else {}
 
