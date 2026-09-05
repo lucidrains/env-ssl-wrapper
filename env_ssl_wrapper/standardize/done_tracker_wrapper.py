@@ -12,6 +12,7 @@ from .helpers import (
     env_num_envs,
     exists,
     get_attr,
+    is_array,
     is_vectorized,
     to_numpy,
 )
@@ -25,6 +26,10 @@ def get_batch_size(tree) -> int | None:
         return None
 
     first = leaves[0]
+
+    if is_array(first):
+        return len(first) if first.ndim > 0 else None
+
     return len(first) if exists(get_attr(first, '__len__')) else None
 
 # classes

@@ -39,6 +39,12 @@ def maybe_expand_dim(x):
 
         return rearrange(arr, '... -> 1 ...')
 
+    if is_tensor(x):
+        return rearrange(x, '-> 1') if x.ndim == 0 else rearrange(x, '... -> 1 ...')
+
+    if isinstance(x, np.ndarray) and x.dtype.kind in 'biufc':
+        return rearrange(x, '-> 1') if x.ndim == 0 else rearrange(x, '... -> 1 ...')
+
     return tree_map(_expand, x)
 
 def is_integer_dtype(t):

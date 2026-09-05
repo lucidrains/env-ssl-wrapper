@@ -175,7 +175,7 @@ class WrapperAdapter(BaseEnvAdapter):
     @property
     def autoresets(self) -> bool:
         val = first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode')
-        return bool(val) if exists(val) else self.inner_adapter.autoresets
+        return truthy_attr(val) if exists(val) else self.inner_adapter.autoresets
 
     @property
     def action_space(self):
@@ -201,19 +201,6 @@ class DMControlAdapter(BaseEnvAdapter):
         is_dm_type = 'DMControl' in name or 'dm_control' in mod or 'dm_env' in mod
         has_physics = exists(get_attr(env, 'physics')) and callable(get_attr(get_attr(env, 'physics'), 'render'))
         return is_dm_type or has_physics
-
-    def step(self, action):
-        out = self.env.step(action)
-        if is_time_step(out):
-            last = out.last() if callable(get_attr(out, 'last')) else out.step_type == 2
-            return out.observation, out.reward, last, False, dict(discount = out.discount)
-        return super().step(action)
-
-    def reset(self, **kwargs):
-        out = self.env.reset(**kwargs)
-        if is_time_step(out):
-            return out.observation, {}
-        return super().reset(**kwargs)
 
     def seed(self, seed: int):
         random_state = get_attr(get_attr(self.env, 'task'), '_random')

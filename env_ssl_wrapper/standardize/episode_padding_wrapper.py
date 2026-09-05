@@ -8,7 +8,7 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from einops import rearrange
 
-from .helpers import EnvWrapper, copy_leaf, dones_of, exists, is_vectorized, to_numpy
+from .helpers import EnvWrapper, copy_leaf, dones_of, env_autoresets, exists, is_vectorized, to_numpy
 
 # helpers
 
@@ -63,6 +63,7 @@ class EpisodePaddingWrapper(EnvWrapper):
     def __init__(self, env):
         super().__init__(env)
         self.is_vector = is_vectorized(env)
+        self.autoreset = env_autoresets(env)
         self._last_obs = None
         self._is_done = None
         self._final_obs = None
@@ -83,11 +84,14 @@ class EpisodePaddingWrapper(EnvWrapper):
             dones = dones_of(terminated, truncated)
             mask = to_numpy(dones).astype(bool)
 
+            if self._is_done is None or len(self._is_done) != len(mask):
+                self._is_done = np.zeros(len(mask), dtype = bool)
+
+            if self.autoreset:
+                self._is_done &= mask
+
             if mask.any():
                 assert exists(self._last_obs), 'environment needs reset before calling step. call env.reset() first'
-
-                if self._is_done is None or len(self._is_done) != len(mask):
-                    self._is_done = np.zeros(len(mask), dtype = bool)
 
                 newly = mask & ~self._is_done
                 self._is_done |= mask

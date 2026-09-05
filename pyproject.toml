@@ -1,6 +1,6 @@
 [project]
 name = "env-ssl-wrapper"
-version = "0.3.0"
+version = "0.4.0"
 description = "One torch-native interface for any MDP environment"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -39,7 +39,9 @@ Homepage = "https://pypi.org/project/env-ssl-wrapper/"
 Repository = "https://codeberg.org/lucidrains/env-ssl-wrapper"
 
 [project.optional-dependencies]
-examples = []
+examples = [
+    "fire",
+]
 test = [
     "pytest",
     "gymnasium>=0.29.1",
@@ -65,10 +67,6 @@ testpaths = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.rye]
-managed = true
-dev-dependencies = []
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -11,43 +11,49 @@ from .helpers import EnvWrapper, exists, get_attr, is_scalar
 
 # helpers
 
-def numpy_to_torch(x, device, cast_obs_to_float = True):
-    # numpy / scalars / foreign array-likes to torch; float32 unless disabled
-
-    def _to_torch(t):
-        if not is_tensor(t):
-            if isinstance(t, np.ndarray):
-                t = from_numpy(np.array(t))
-            elif is_scalar(t):
-                t = tensor(t)
-            elif exists(get_attr(t, '__array__')):
-                t = from_numpy(np.array(t))
-            else:
-                return t
-
-        dtype = torch.float32 if cast_obs_to_float and t.dtype != torch.bool else t.dtype
-        return t.to(device = device, dtype = dtype)
-    return tree_map(_to_torch, x)
-
-def torch_to_numpy(x):
-    # torch to numpy; 0-dim collapses to scalar, float64 → float32
-
-    def _to_numpy(t):
-        if is_tensor(t):
-            t = t.detach().cpu().numpy()
+def to_torch_leaf(t, device, cast_obs_to_float = True):
+    if not is_tensor(t):
+        if isinstance(t, np.ndarray):
+            t = from_numpy(t.copy())
         elif is_scalar(t):
-            t = np.asarray(t)
+            t = tensor(t)
+        elif exists(get_attr(t, '__array__')):
+            t = from_numpy(np.asarray(t))
         else:
             return t
 
-        if t.ndim == 0:
-            return t.item()
+    dtype = torch.float32 if cast_obs_to_float and t.dtype != torch.bool else t.dtype
+    return t.to(device = device, dtype = dtype)
 
-        if t.dtype == np.float64:
-            t = t.astype(np.float32)
+def numpy_to_torch(x, device, cast_obs_to_float = True):
+    # numpy / scalars / foreign array-likes to torch; float32 unless disabled
+    if not isinstance(x, (dict, list, tuple)):
+        return to_torch_leaf(x, device, cast_obs_to_float)
 
+    return tree_map(partial(to_torch_leaf, device = device, cast_obs_to_float = cast_obs_to_float), x)
+
+def to_numpy_leaf(t):
+    if is_tensor(t):
+        t = t.detach().cpu().numpy()
+    elif is_scalar(t):
+        t = np.asarray(t)
+    else:
         return t
-    return tree_map(_to_numpy, x)
+
+    if t.ndim == 0:
+        return t.item()
+
+    if t.dtype == np.float64:
+        t = t.astype(np.float32)
+
+    return t
+
+def torch_to_numpy(x):
+    # torch to numpy; 0-dim collapses to scalar, float64 → float32
+    if not isinstance(x, (dict, list, tuple)):
+        return to_numpy_leaf(x)
+
+    return tree_map(to_numpy_leaf, x)
 
 # rewards float32, dones bool
 
@@ -96,6 +102,12 @@ class TensorWrapper(EnvWrapper):
 
         return obs, info
 
+    def to_contract(self, t, to_float = False):
+        if not isinstance(t, (dict, list, tuple)):
+            leaf = to_torch_leaf(t, self.device, cast_obs_to_float = False)
+            return contract(leaf, to_float = to_float)
+        return contract(self.cast(t), to_float = to_float)
+
     def step(self, action):
         action = torch_to_numpy(action) if self.convert_in else action
         obs, reward, terminated, truncated, info = self.env.step(action)
@@ -104,9 +116,9 @@ class TensorWrapper(EnvWrapper):
             return obs, reward, terminated, truncated, info
 
         obs = self.cast(obs)
-        reward = contract(self.cast(reward), to_float = True)
-        terminated = contract(self.cast(terminated))
-        truncated = contract(self.cast(truncated))
+        reward = self.to_contract(reward, to_float = True)
+        terminated = self.to_contract(terminated)
+        truncated = self.to_contract(truncated)
         self.cast_info(info)
 
         return obs, reward, terminated, truncated, info

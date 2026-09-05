@@ -5,6 +5,21 @@ from torch import nn
 import gymnasium as gym
 from env_ssl_wrapper import compose_env
 
+def test_readme_standardize_env_wrapper():
+    from env_ssl_wrapper import StandardizeEnvWrapper
+
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    obs, info = env.reset()
+    assert torch.is_tensor(obs)
+    assert obs.shape == (1, 4)
+
+    step_count = 0
+    while not env.all_done and step_count < 5:
+        actions = torch.randint(0, 2, (1,))
+        obs, reward, terminated, truncated, info = env.step(actions)
+        step_count += 1
+    assert step_count == 5
+
 def test_readme_usage_snippet():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -128,3 +143,35 @@ def test_readme_janky_sim_adapter():
     obs, reward, terminated, truncated, info = env.step(torch.randn(1, 1))
     assert reward == -0.05
     assert not terminated
+
+def test_readme_final_observation_utils():
+    from env_ssl_wrapper import (
+        has_final_observation,
+        get_final_observation,
+        maybe_get_final_observation,
+        maybe_transform_final_observation,
+    )
+
+    info = dict(final_observation = torch.tensor([1.0, 2.0]))
+    assert has_final_observation(info)
+    assert torch.equal(get_final_observation(info), torch.tensor([1.0, 2.0]))
+    assert torch.equal(maybe_get_final_observation(info), torch.tensor([1.0, 2.0]))
+
+    empty_info = dict()
+    assert not has_final_observation(empty_info)
+    assert maybe_get_final_observation(empty_info) is None
+    assert torch.equal(get_final_observation(empty_info, default = torch.tensor([0.0])), torch.tensor([0.0]))
+
+    transformed = maybe_transform_final_observation(info, lambda x: x * 2)
+    assert torch.equal(transformed['final_observation'], torch.tensor([2.0, 4.0]))
+
+def test_readme_memory_trace_snippet():
+    from env_ssl_wrapper import StandardizeEnvWrapper, MemoryTraceWrapper
+
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    env = MemoryTraceWrapper(env, lambdas = (0.9, 0.99))
+
+    obs, info = env.reset()
+    assert 'obs' in obs and 'trace_0.9' in obs and 'trace_0.99' in obs
+    assert obs['obs'].shape == (1, 4)
+    assert obs['trace_0.9'].shape == (1, 4)

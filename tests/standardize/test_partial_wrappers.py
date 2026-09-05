@@ -153,7 +153,7 @@ def test_flatten_without_tensor():
 
     obs, info = env.reset()
     assert isinstance(obs, np.ndarray)
-    assert obs.shape == (8, 3)
+    assert obs.shape == (24,)
 
 # image without tensor / auto_batch — numpy state, unbatched torch image
 

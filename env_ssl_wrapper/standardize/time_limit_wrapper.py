@@ -26,8 +26,15 @@ def back_to_like(t, numpy_arr):
     return numpy_arr
 
 class TimeLimitWrapper(EnvWrapper):
-    # caps episode length at max_timesteps, setting truncated = True for
-    # capped envs (vectorized and single alike); timers reset per episode
+    """
+    caps episode length at max_timesteps, setting truncated = True for
+    capped envs (vectorized and single alike); timers reset per episode.
+
+    Note on vector environments:
+    Marking a slot as truncated signals the time limit to downstream consumers,
+    but does not stop the underlying simulator slot if it runs continuously or
+    autoresets. Downstream loops should check `truncated` to reset consumer state.
+    """
 
     def __init__(self, env, max_timesteps):
         super().__init__(env)

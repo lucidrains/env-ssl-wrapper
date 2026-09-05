@@ -8,25 +8,68 @@ One line turns any simulator's environment — mujoco warp, isaac sim, pybullet,
 pip install env-ssl-wrapper
 ```
 
-## Usage
+## Standardize
 
 ```python
 import torch
-from env_ssl_wrapper import compose_env
+from env_ssl_wrapper import StandardizeEnvWrapper
 
-env = compose_env(
-    any_env,                                 # any env from any sim
-    ('tensor', dict(device='cpu')),          # wrap with whatever you need
-    'done_tracker',
-)
+# one master wrapper to standardize any simulator environment
 
-obs, info = env.reset()                      # torch.float32, batched
+env = StandardizeEnvWrapper(any_env)
+
+obs, info = env.reset() # torch.float32, batched
+
 while not env.all_done:
     actions = torch.randint(0, 2, (8,))
     obs, reward, terminated, truncated, info = env.step(actions)
 ```
 
 Works identically for every simulator.
+
+Or compose individual wrappers piecemeal:
+
+```python
+from env_ssl_wrapper import compose_env
+
+env = compose_env(
+    any_env,
+    ('tensor', dict(device = 'cpu')),
+    'done_tracker',
+)
+```
+
+## Research Wrappers
+
+### Memory Trace
+
+A cheap memory that keeps track of an exponential moving average (EMA) of a state, or subset ([Eberhard et al., 2025](https://arxiv.org/abs/2503.15200)).
+
+```python
+import gymnasium as gym
+from env_ssl_wrapper import StandardizeEnvWrapper, MemoryTraceWrapper
+
+env = StandardizeEnvWrapper(gym.make('LunarLander-v3'))
+env = MemoryTraceWrapper(env, lambdas = (0.9, 0.99))
+
+obs, info = env.reset()
+# obs['obs']        -> (1, 8)
+# obs['trace_0.9']  -> (1, 8)
+# obs['trace_0.99'] -> (1, 8)
+```
+
+Or on a subset of dictionary observations:
+
+```python
+env = MemoryTraceWrapper(env, lambdas = (0.9, 0.99), keys = 'proprio')
+# obs['proprio_trace_0.9'] -> (1, 2)
+```
+
+Run the PPO benchmark on POMDP LunarLander:
+
+```bash
+uv run test_memory_trace.py
+```
 
 ## Wrappers
 
@@ -107,15 +150,6 @@ obs, info = env.reset()
 obs, reward, terminated, truncated, info = env.step(torch.randn(1, 1))
 ```
 
-## Mock sims
-
-`env_ssl_wrapper.mocks` ships dependency-free stand-ins emulating each simulator's quirks (`GymnasiumMockEnv`, `IsaacMockEnv`, `DMControlMockEnv`, ...) for testing your code without installing the real sims.
-
-```python
-from env_ssl_wrapper.mocks import IsaacMockEnv
-env = compose_env(IsaacMockEnv(), 'tensor', 'done_tracker')
-```
-
 ## Multiprocessing
 
 Parallelize any single environment or factory into an autoresetting vector env:
@@ -132,5 +166,16 @@ with MultiprocessingVecEnv('CartPole-v1', num_envs = 8) as env:
 
 ```bash
 uv sync --extra test
-uv run pytest tests/test_real_envs.py
+uv run pytest
+```
+
+## Citations
+
+```bibtex
+@article{eberhard2025partially,
+    title   = {Partially Observable Reinforcement Learning with Memory Traces},
+    author  = {Onno Eberhard and Michael Muehlebach and Claire Vernade},
+    journal = {arXiv preprint arXiv:2503.15200},
+    year    = {2025}
+}
 ```

@@ -414,3 +414,63 @@ def test_multiprocessing_vec_env_abrupt_worker_death():
         env._procs[0].join()
         with pytest.raises(RuntimeError, match = 'worker process terminated unexpectedly'):
             env.step(np.zeros((2, 2)))
+
+class DictActionMockEnv(GymnasiumMockEnv):
+    def step(self, action):
+        assert isinstance(action, dict), f'expected dict, got {type(action)}'
+        assert 'steer' in action and 'throttle' in action
+        return super().step(np.concatenate([action['steer'], action['throttle']]))
+
+def test_multiprocessing_vec_env_dict_action():
+    with MultiprocessingVecEnv(DictActionMockEnv, num_envs = 2) as env:
+        env.reset()
+        action = dict(
+            steer = np.zeros((2, 1)),
+            throttle = np.zeros((2, 1))
+        )
+        obs, reward, terminated, truncated, info = env.step(action)
+        assert obs.shape == (2, 4)
+
+class TupleActionMockEnv(GymnasiumMockEnv):
+    def step(self, action):
+        assert isinstance(action, tuple), f'expected tuple, got {type(action)}'
+        return super().step(np.concatenate(action))
+
+def test_multiprocessing_vec_env_tuple_action():
+    with MultiprocessingVecEnv(TupleActionMockEnv, num_envs = 2) as env:
+        env.reset()
+        action = (np.zeros((2, 1)), np.zeros((2, 1)))
+        obs, reward, terminated, truncated, info = env.step(action)
+        assert obs.shape == (2, 4)
+
+class AutoresetCounterMockEnv(GymnasiumMockEnv):
+    autoresets = True
+
+    def __init__(self):
+        self.reset_count = 0
+        super().__init__()
+
+    def reset_state(self):
+        super().reset_state()
+        self.reset_count += 1
+
+    def step(self, action):
+        self.t += 1
+        done = self.t >= 2
+        if done:
+            terminal_obs = self.obs()
+            self.reset_state()
+            return self.obs(), 1.0, True, False, {'final_observation': terminal_obs}
+        return self.obs(), 1.0, False, False, {}
+
+def test_multiprocessing_vec_env_autoreset_no_double_reset():
+    with MultiprocessingVecEnv(AutoresetCounterMockEnv, num_envs = 1) as env:
+        env.reset()
+        initial_resets = env._conns[0].env.reset_count
+        env.step([np.zeros(2)])
+        assert env._conns[0].env.reset_count == initial_resets
+        obs, rew, term, trunc, info = env.step([np.zeros(2)])
+        assert term[0]
+        assert env._conns[0].env.reset_count == initial_resets + 1
+        assert 'final_observation' in info
+

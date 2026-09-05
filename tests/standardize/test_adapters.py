@@ -210,3 +210,12 @@ def test_newcomer_adapter_extension():
     assert not terminated
     assert info['status'] == 'ok'
     assert new_env.stepped
+
+def test_wrapper_adapter_autoresets_truthy_attr():
+    class CallableAutoresetEnv:
+        def autoreset(self):
+            pass
+
+    env = StandardizeWrapper(CallableAutoresetEnv())
+    adapter = get_adapter(env)
+    assert not adapter.autoresets

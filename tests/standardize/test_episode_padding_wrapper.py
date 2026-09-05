@@ -310,3 +310,46 @@ def test_gymnasium_vector_autoreset():
 
     # autoreset envs revive the step after termination — padding only applies
     # while an env stays done (non-autoreset envs, covered by the mocks above)
+
+def test_pad_autoreset_subsequent_terminations():
+    env = EpisodePaddingWrapper(AutoresetVectorMockEnv())
+    obs, info = env.reset()
+
+    termination_count = 0
+
+    for _ in range(200):
+        obs, reward, terminated, truncated, info = env.step(np.ones((4, 2)))
+        dones = terminated | truncated
+        mask = np.asarray(dones).astype(bool)
+
+        if mask.any():
+            termination_count += 1
+            # terminating step's real reward must be preserved on EVERY termination
+            assert (reward[mask] == 1.0).all()
+            assert (obs[mask] == 0.0).all()
+            assert 'final_observation' in info
+            if termination_count >= 5:
+                break
+
+    assert termination_count >= 5
+
+def test_gymnasium_vector_autoreset_multiple_terminations():
+    pytest.importorskip('gymnasium')
+    import gymnasium as gym
+    from env_ssl_wrapper import compose_env
+
+    env = compose_env(gym.make_vec('CartPole-v1', num_envs = 2), 'tensor', 'done_tracker')
+    obs, info = env.reset()
+
+    term_count = 0
+    for _ in range(500):
+        action = torch.randint(0, 2, (2,))
+        obs, reward, terminated, truncated, info = env.step(action)
+        dones = (terminated | truncated).cpu().numpy().astype(bool)
+        if dones.any():
+            term_count += 1
+            assert (reward[dones] == 1.0).all()
+            if term_count >= 4:
+                break
+
+    assert term_count >= 4

@@ -223,6 +223,8 @@ def test_brax_seed_works():
 
 def test_flatten_jax_dict_obs():
     class JaxDictEnv:
+        is_vector = True
+
         def reset(self, **kwargs):
             return dict(
                 state = JaxArray(np.arange(8, dtype = np.float64).reshape(2, 4)),

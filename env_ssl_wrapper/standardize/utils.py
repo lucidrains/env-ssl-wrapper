@@ -27,14 +27,27 @@ WRAPPERS = dict(
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):
-        if wrapper not in WRAPPERS:
-            raise ValueError(f'unknown wrapper {wrapper!r} — choose from {sorted(WRAPPERS)}')
-
-        wrapper = WRAPPERS[wrapper]
+        if wrapper == 'memory_trace':
+            from ..memory_trace import MemoryTraceWrapper
+            wrapper = MemoryTraceWrapper
+        elif wrapper in ('standardize_env', 'master'):
+            from .standardize_env_wrapper import StandardizeEnvWrapper
+            wrapper = StandardizeEnvWrapper
+        elif wrapper not in WRAPPERS:
+            raise ValueError(f'unknown wrapper {wrapper!r} — choose from {sorted([*WRAPPERS, "memory_trace", "standardize_env"])}')
+        else:
+            wrapper = WRAPPERS[wrapper]
 
     if isinstance(wrapper, tuple):
         name, kwargs = wrapper
-        wrapper = partial(WRAPPERS.get(name, name), **kwargs)
+        if name == 'memory_trace':
+            from ..memory_trace import MemoryTraceWrapper
+            wrapper = partial(MemoryTraceWrapper, **kwargs)
+        elif name in ('standardize_env', 'master'):
+            from .standardize_env_wrapper import StandardizeEnvWrapper
+            wrapper = partial(StandardizeEnvWrapper, **kwargs)
+        else:
+            wrapper = partial(WRAPPERS.get(name, name), **kwargs)
 
     elif isinstance(wrapper, dict):
         raise ValueError("wrapper kwargs must be passed as (name, kwargs), e.g. ('tensor', dict(device = 'cpu'))")
@@ -62,6 +75,17 @@ def compose_env(env, *wrappers, pad_episodes: bool = True):
     if pad_episodes and EpisodePaddingWrapper not in classes and is_vectorized(env):
         funcs.insert(1, EpisodePaddingWrapper)
         classes.insert(1, EpisodePaddingWrapper)
+
+    from ..memory_trace import MemoryTraceWrapper
+    if MemoryTraceWrapper in classes and TensorWrapper in classes:
+        idx_mem = classes.index(MemoryTraceWrapper)
+        idx_ten = classes.index(TensorWrapper)
+        if idx_mem < idx_ten:
+            f = funcs.pop(idx_mem)
+            c = classes.pop(idx_mem)
+            idx_ten = classes.index(TensorWrapper)
+            funcs.insert(idx_ten + 1, f)
+            classes.insert(idx_ten + 1, c)
 
     assert len(set(classes)) == len(classes), 'duplicate wrappers found'
 

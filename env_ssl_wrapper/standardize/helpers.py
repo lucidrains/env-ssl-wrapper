@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import numpy as np
 from torch import is_tensor
 from torch.utils._pytree import tree_map
@@ -62,6 +63,8 @@ def copy_leaf(x):
     return x
 
 def dones_of(terminated, truncated):
+    if not isinstance(terminated, (dict, list, tuple)):
+        return terminated | truncated
     return tree_map(lambda a, b: a | b, terminated, truncated)
 
 # environment probes
@@ -84,6 +87,33 @@ def env_render(env, height, width, camera = None):
 
 def is_vectorized(env) -> bool:
     return get_adapter(env).is_vectorized
+
+def has_final_observation(info):
+    return isinstance(info, dict) and 'final_observation' in info
+
+def maybe_get_final_observation(info):
+    if isinstance(info, dict):
+        return info.get('final_observation')
+
+    return None
+
+def get_final_observation(info, default = None):
+    final_obs = maybe_get_final_observation(info)
+
+    if exists(final_obs):
+        return final_obs
+
+    if exists(default):
+        return default
+
+    raise KeyError("no 'final_observation' found in info")
+
+def maybe_transform_final_observation(info, fn):
+    if not has_final_observation(info):
+        return info
+
+    info['final_observation'] = fn(info['final_observation'])
+    return info
 
 def mark_terminal_obs(info, obs, dones, is_vector):
     # single-env terminal contract — vector envs handled by EpisodePaddingWrapper
@@ -132,3 +162,60 @@ class EnvWrapper:
         if name.startswith('_'):
             raise AttributeError(f"attempted to get missing private attribute '{name}'")
         return getattr(self.env, name)
+
+def accepts_done_param(fn):
+    try:
+        params = inspect.signature(fn).parameters
+        return 'done' in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (ValueError, TypeError):
+        return False
+
+class TransformObservationWrapper(EnvWrapper):
+    """
+    Base observation wrapper that automatically handles:
+    - Calling transform_obs on observations in reset() and step()
+    - Detecting environment autoreset and passing `done` to stateful transforms
+    - Propagating transformed observations to info['final_observation']
+    """
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.autoresets = env_autoresets(env)
+        self.takes_done = accepts_done_param(self.transform_obs)
+
+    def transform_obs(self, obs, done = None):
+        if hasattr(self, 'observation'):
+            return self.observation(obs)
+        return obs
+
+    def transform(self, obs, done = None):
+        return self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
+
+    def observation(self, obs):
+        return self.transform_obs(obs)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        obs = self.transform_obs(obs)
+
+        if isinstance(info, dict) and 'final_observation' in info:
+            info['final_observation'] = self.transform_obs(info['final_observation'])
+
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        done = dones_of(terminated, truncated) if self.autoresets else None
+
+        out = self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
+
+        if isinstance(info, dict) and 'final_observation' in info:
+            if not self.takes_done:
+                info['final_observation'] = self.transform_obs(info['final_observation'])
+            elif not self.autoresets:
+                info['final_observation'] = out
+
+        return out, reward, terminated, truncated, info
+
+ObservationWrapper = TransformObservationWrapper
+

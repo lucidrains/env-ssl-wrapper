@@ -63,6 +63,8 @@ def test_int_obs_cast_to_float32():
 # flatten — edge cases: single-leaf dict, empty dict, non-array leaves
 
 class DictEnv:
+    is_vector = True
+
     def __init__(self, obs):
         self.obs = obs
 
@@ -360,6 +362,8 @@ def test_image_key_collision_raises():
 
 def test_flatten_nested_dict():
     class NestedEnv:
+        is_vector = True
+
         def reset(self):
             return dict(obs = dict(a = np.zeros((2, 3)), b = np.zeros((2, 2))), meta = 'x'), {}
 
@@ -375,6 +379,8 @@ def test_flatten_nested_dict():
 
 def test_flatten_final_observation():
     class TerminalEnv:
+        is_vector = True
+
         def reset(self, **kwargs):
             return dict(obs = np.zeros((1, 4)), goal = np.zeros((1, 3))), {}
 
@@ -406,6 +412,18 @@ def test_flatten_unbatched_dict():
     env = FlattenObsWrapper(DictEnv())
     obs, info = env.reset()
     assert obs.shape == (4 + 3,)
+
+def test_flatten_unbatched_equal_length_leaves():
+    class SingleEnv:
+        def reset(self, **kwargs):
+            return dict(proprio = np.zeros(4), goal = np.zeros(4)), {}
+
+        def step(self, action):
+            return self.reset()[0], 0.0, False, False, {}
+
+    env = FlattenObsWrapper(SingleEnv())
+    obs, info = env.reset()
+    assert obs.shape == (8,)
 
 # and a full pipeline without auto_batch — done_tracker auto-batches the flat obs
 
@@ -558,3 +576,25 @@ def test_zero_mask_scalar_fill():
     assert zero_mask(1.0, mask) == 1.0  # no fill_scalar -> untouched
     assert zero_mask(1.0, mask, fill_scalar = 0.0) == 0.0
     assert zero_mask(1.0, np.array([False, False]), fill_scalar = 0.0) == 1.0
+
+# done_tracker — 0-d tensors handled without raising TypeError on len()
+
+def test_done_tracker_zero_d_tensor():
+    from env_ssl_wrapper import DoneTrackerWrapper
+
+    class ZeroDTensorVecEnv:
+        is_vector = True
+        num_envs = 1
+
+        def reset(self, **kwargs):
+            return torch.tensor(1.0), {}
+
+        def step(self, action):
+            return torch.tensor(1.0), 1.0, False, False, {}
+
+    env = DoneTrackerWrapper(ZeroDTensorVecEnv())
+    obs, info = env.reset()
+    assert torch.equal(obs, torch.tensor(1.0))
+    obs, rew, term, trunc, info = env.step(0)
+    assert not term
+

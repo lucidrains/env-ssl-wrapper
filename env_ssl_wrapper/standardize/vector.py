@@ -6,7 +6,7 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
 
-from .helpers import any_true, dones_of, exists, get_attr, instantiate_env, safe_close
+from .helpers import any_true, dones_of, exists, get_attr, instantiate_env, safe_close, truthy_attr
 from .spaces import action_dim_of
 from .standardize_wrapper import StandardizeWrapper
 
@@ -23,6 +23,20 @@ def _stack_leaves(leaves):
     return np.stack(leaves)
 
 def _stack_trees(trees):
+    first = trees[0]
+
+    if is_tensor(first):
+        return torch.stack(trees)
+
+    if isinstance(first, np.ndarray):
+        return np.stack(trees)
+
+    if isinstance(first, dict):
+        return {key: _stack_trees([t[key] for t in trees]) for key in first}
+
+    if isinstance(first, tuple):
+        return tuple(_stack_trees([t[i] for t in trees]) for i in range(len(first)))
+
     leaves = [tree_flatten(tree)[0] for tree in trees]
     stacked = [_stack_leaves(col) for col in zip(*leaves)]
     return tree_unflatten(stacked, tree_structure(trees[0]))
@@ -57,7 +71,10 @@ def _exec(env, cmd, payload):
         obs, reward, terminated, truncated, info = env.step(payload)
 
         if any_true(dones_of(terminated, truncated)):
-            obs, final_obs = env.reset()[0], obs
+            if truthy_attr(get_attr(env.adapter, 'autoresets')):
+                final_obs = info.get('final_observation', obs)
+            else:
+                obs, final_obs = env.reset()[0], obs
         else:
             final_obs = None
 
@@ -165,14 +182,33 @@ def _shutdown(conns, procs):
     for conn in conns:
         try:
             conn.send(('close', None))
-        except (EOFError, BrokenPipeError):
+        except (EOFError, BrokenPipeError, OSError):
             pass
 
     for proc in procs:
-        proc.join(timeout = 2)
+        if proc.is_alive():
+            proc.join(timeout = 0.2)
 
         if proc.is_alive():
             proc.terminate()
+
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _split_actions(actions, num_envs):
+    if isinstance(actions, dict):
+        assert all(len(v) == num_envs for v in actions.values()), f'expected {num_envs} actions per key'
+        return [{k: v[i] for k, v in actions.items()} for i in range(num_envs)]
+
+    if isinstance(actions, tuple) and not is_tensor(actions) and not isinstance(actions, np.ndarray):
+        assert all(len(v) == num_envs for v in actions), f'expected {num_envs} actions per element'
+        return [tuple(elem[i] for elem in actions) for i in range(num_envs)]
+
+    assert len(actions) == num_envs, f'expected {num_envs} actions, but got {len(actions)}'
+    return actions
 
 # class
 
@@ -260,7 +296,7 @@ class MultiprocessingVecEnv:
         return _stack_trees([obs for obs, _ in results]), _merge_infos([info for _, info in results])
 
     def step(self, actions):
-        assert len(actions) == self.num_envs, f'expected {self.num_envs} actions, but got {len(actions)}'
+        actions = _split_actions(actions, self.num_envs)
 
         for conn, action in zip(self._conns, actions):
             _safe_send(conn, ('step', action))

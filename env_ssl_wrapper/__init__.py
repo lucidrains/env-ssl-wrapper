@@ -1,59 +1,47 @@
-from .standardize_wrapper import StandardizeWrapper
-from .image_wrapper import ImageObservationWrapper
-from .auto_batched_wrapper import AutoBatchedWrapper
-from .tensor_wrapper import TensorWrapper
-from .action_transform_wrapper import ActionTransformWrapper
-from .done_tracker_wrapper import DoneTrackerWrapper
-from .flatten_obs_wrapper import FlattenObsWrapper
-from .episode_padding_wrapper import EpisodePaddingWrapper
-from .time_limit_wrapper import TimeLimitWrapper
-from .vector import MultiprocessingVecEnv
+from __future__ import annotations
 
-from .adapters import (
-    BaseEnvAdapter,
-    get_adapter,
-    register_adapter,
-    MujocoWarpAdapter,
-    IsaacAdapter,
-    PyBulletAdapter,
-    DMControlAdapter,
-    PufferLibAdapter,
-    RoboticsAdapter,
-    GymnasiumAdapter,
-    LegacyGymAdapter,
-    DefaultAdapter,
-)
-from .spaces import (
-    InferredSpace,
-    infer_observation_space,
-    space_from_action_spec,
-    action_space_dim,
-    action_space_is_discrete,
-    action_space_is_box,
-    action_space_bounds,
-    action_dim_of,
-    obs_dim_of,
+import sys
+from . import standardize
+from .standardize import *
+
+from .memory_trace import MemoryTraceWrapper
+
+# Wire backwards-compatibility aliases in sys.modules and module globals
+# so imports like `from env_ssl_wrapper.done_tracker_wrapper import DoneTrackerWrapper`
+# or `import env_ssl_wrapper.mocks` continue to work without breaking.
+
+_STANDARDIZE_SUBMODULES = (
+    'adapters',
+    'auto_batched_wrapper',
+    'action_transform_wrapper',
+    'done_tracker_wrapper',
+    'episode_padding_wrapper',
+    'flatten_obs_wrapper',
+    'helpers',
+    'image_wrapper',
+    'mocks',
+    'spaces',
+    'standardize_wrapper',
+    'tensor_wrapper',
+    'time_limit_wrapper',
+    'standardize_env_wrapper',
+    'utils',
+    'vector',
 )
 
-from .mocks import (
-    MockEnv,
-    GymnasiumMockEnv,
-    GymnasiumDiscreteMockEnv,
-    LegacyGymMockEnv,
-    PyBulletMockEnv,
-    DMControlMockEnv,
-    IsaacMockEnv,
-    AutoresetVectorMockEnv,
-    PufferVectorMockEnv,
-    PufferTensorMockEnv,
-    ManiSkillMockEnv,
-    BraxMockEnv,
-    MjxMockEnv,
-    MetaWorldMockEnv,
-    TrifingerMockEnv,
-    HabitatMockEnv,
-    TupleObsMockEnv,
-    JaxArray
-)
+for _name in _STANDARDIZE_SUBMODULES:
+    _mod = getattr(standardize, _name, None)
+    if _mod is not None:
+        sys.modules[f'{__name__}.{_name}'] = _mod
+        globals()[_name] = _mod
 
-from .utils import wrap_env, compose_env
+__all__ = [
+    *standardize.__all__,
+    'MemoryTraceWrapper',
+]
+
+def __getattr__(name):
+    if hasattr(standardize, name):
+        return getattr(standardize, name)
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
