@@ -7,7 +7,15 @@ import torch
 from torch import tensor, is_tensor, from_numpy, device as torch_device
 from torch.utils._pytree import tree_map
 
-from .helpers import EnvWrapper, exists, get_attr, is_scalar
+from .helpers import (
+    EnvWrapper,
+    FINAL_OBSERVATION_KEYS,
+    FINAL_OBSERVATION_MASK_KEYS,
+    exists,
+    get_attr,
+    is_scalar,
+    unpack_vector_observations,
+)
 
 # helpers
 
@@ -27,6 +35,9 @@ def to_torch_leaf(t, device, cast_obs_to_float = True):
 
 def numpy_to_torch(x, device, cast_obs_to_float = True):
     # numpy / scalars / foreign array-likes to torch; float32 unless disabled
+    if isinstance(x, np.ndarray) and x.dtype == object:
+        x = unpack_vector_observations(x)
+
     if not isinstance(x, (dict, list, tuple)):
         return to_torch_leaf(x, device, cast_obs_to_float)
 
@@ -88,10 +99,16 @@ class TensorWrapper(EnvWrapper):
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
     def cast_info(self, info):
+        if not isinstance(info, dict):
+            return
 
-        if isinstance(info, dict) and 'final_observation' in info:
-            info['final_observation'] = self.cast(info['final_observation'])
-            info['_final_observation'] = contract(self.cast(info['_final_observation']))
+        for key in FINAL_OBSERVATION_KEYS:
+            if key in info:
+                info[key] = self.cast(info[key])
+
+        for key in FINAL_OBSERVATION_MASK_KEYS:
+            if key in info:
+                info[key] = contract(self.cast(info[key]))
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

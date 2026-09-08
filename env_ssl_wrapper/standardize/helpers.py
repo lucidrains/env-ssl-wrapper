@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import inspect
 import numpy as np
+import torch
 from torch import is_tensor
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
 
 # helpers
 
@@ -32,10 +33,13 @@ def truthy_attr(value):
 
 def first_existing(obj, *names):
     for name in names:
-        value = get_attr(obj, name)
-
-        if exists(value):
-            return value
+        if isinstance(obj, dict):
+            if name in obj and exists(obj[name]):
+                return obj[name]
+        else:
+            value = get_attr(obj, name)
+            if exists(value):
+                return value
 
     return None
 
@@ -67,6 +71,58 @@ def dones_of(terminated, truncated):
         return terminated | truncated
     return tree_map(lambda a, b: a | b, terminated, truncated)
 
+def _zero_leaf(x):
+    if is_tensor(x):
+        return torch.zeros_like(x)
+    if isinstance(x, np.ndarray):
+        return np.zeros_like(x)
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, (int, float, np.number)):
+        return np.zeros_like(x)
+    return 0
+
+def _stack_leaves(leaves):
+    if all(map(is_tensor, leaves)):
+        return torch.stack(leaves)
+    return np.stack(leaves)
+
+def stack_trees(trees):
+    first = trees[0]
+
+    if is_tensor(first):
+        return torch.stack(trees)
+
+    if isinstance(first, np.ndarray):
+        return np.stack(trees)
+
+    if isinstance(first, dict):
+        return {key: stack_trees([t[key] for t in trees]) for key in first}
+
+    if isinstance(first, tuple):
+        return tuple(stack_trees([t[i] for t in trees]) for i in range(len(first)))
+
+    leaves = [tree_flatten(tree)[0] for tree in trees]
+    stacked = [_stack_leaves(col) for col in zip(*leaves)]
+    return tree_unflatten(stacked, tree_structure(trees[0]))
+
+def unpack_vector_observations(arr):
+    # unpacks a 1D sequence / numpy object array of unbatched single-env observations
+    # (or None for un-terminated slots) into the canonical batched pytree format matching obs
+
+    if not isinstance(arr, (np.ndarray, list, tuple)):
+        return arr
+
+    if isinstance(arr, np.ndarray) and arr.dtype != object:
+        return arr
+
+    sample = next((x for x in arr if x is not None), None)
+    if sample is None:
+        return arr
+
+    trees = [tree_map(_zero_leaf, sample) if x is None else x for x in arr]
+    return stack_trees(trees)
+
 # environment probes
 
 def get_adapter(env):
@@ -88,12 +144,23 @@ def env_render(env, height, width, camera = None):
 def is_vectorized(env) -> bool:
     return get_adapter(env).is_vectorized
 
+# gymnasium 1.x surfaces final observations as 'final_obs' / '_final_obs', everything here uses 'final_observation' / '_final_observation'
+
+FINAL_OBSERVATION_KEYS = ('final_observation', 'final_obs')
+FINAL_OBSERVATION_MASK_KEYS = ('_final_observation', '_final_obs')
+
+# (gymnasium 1.x name, standard name)
+
+FINAL_OBS_ALIASES = (('final_obs', 'final_observation'), ('_final_obs', '_final_observation'))
+
 def has_final_observation(info):
-    return isinstance(info, dict) and 'final_observation' in info
+    return isinstance(info, dict) and any(key in info for key in FINAL_OBSERVATION_KEYS)
 
 def maybe_get_final_observation(info):
     if isinstance(info, dict):
-        return info.get('final_observation')
+        for key in FINAL_OBSERVATION_KEYS:
+            if key in info:
+                return info[key]
 
     return None
 
@@ -112,12 +179,33 @@ def maybe_transform_final_observation(info, fn):
     if not has_final_observation(info):
         return info
 
-    info['final_observation'] = fn(info['final_observation'])
+    for key in FINAL_OBSERVATION_KEYS:
+        if key in info:
+            info[key] = fn(info[key])
+
     return info
 
 def mark_terminal_obs(info, obs, dones, is_vector):
-    # single-env terminal contract — vector envs handled by EpisodePaddingWrapper
-    if not is_vector and isinstance(info, dict) and 'final_observation' not in info and any_true(dones):
+    if not isinstance(info, dict) or not any_true(dones):
+        return
+
+    # vector envs: gymnasium provides final_obs as a 1D object array of single-env obs (or None).
+    # unpack into the standardized batched pytree format matching obs.
+
+    if is_vector:
+        for key in FINAL_OBSERVATION_KEYS:
+            if key in info:
+                info[key] = unpack_vector_observations(info[key])
+
+    # gymnasium 1.x names these 'final_obs' / '_final_obs' — alias to the standard names when provided
+
+    for src, dst in FINAL_OBS_ALIASES:
+        if src in info and dst not in info:
+            info[dst] = info[src]
+
+    # single envs get the final observation synthesized on termination if the sim provided none
+
+    if not is_vector and 'final_observation' not in info:
         info['final_observation'] = obs
         info['_final_observation'] = True
 
@@ -198,8 +286,10 @@ class TransformObservationWrapper(EnvWrapper):
         obs, info = self.env.reset(**kwargs)
         obs = self.transform_obs(obs)
 
-        if isinstance(info, dict) and 'final_observation' in info:
-            info['final_observation'] = self.transform_obs(info['final_observation'])
+        if isinstance(info, dict):
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info:
+                    info[key] = self.transform_obs(info[key])
 
         return obs, info
 
@@ -209,11 +299,13 @@ class TransformObservationWrapper(EnvWrapper):
 
         out = self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
 
-        if isinstance(info, dict) and 'final_observation' in info:
-            if not self.takes_done:
-                info['final_observation'] = self.transform_obs(info['final_observation'])
-            elif not self.autoresets:
-                info['final_observation'] = out
+        if isinstance(info, dict):
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info:
+                    if not self.takes_done:
+                        info[key] = self.transform_obs(info[key])
+                    elif not self.autoresets:
+                        info[key] = out
 
         return out, reward, terminated, truncated, info
 

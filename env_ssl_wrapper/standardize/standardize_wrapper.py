@@ -10,7 +10,6 @@ from .helpers import (
     default,
     dones_of,
     exists,
-    first_existing,
     get_attr,
     instantiate_env,
     mark_terminal_obs,

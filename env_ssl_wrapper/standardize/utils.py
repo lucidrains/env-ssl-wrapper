@@ -4,7 +4,7 @@ from functools import partial
 from .standardize_wrapper import StandardizeWrapper
 from .image_wrapper import ImageObservationWrapper
 from .auto_batched_wrapper import AutoBatchedWrapper
-from .helpers import instantiate_env, is_vectorized
+from .helpers import instantiate_env, is_vectorized, env_autoresets
 from .tensor_wrapper import TensorWrapper
 from .action_transform_wrapper import ActionTransformWrapper
 from .done_tracker_wrapper import DoneTrackerWrapper
@@ -71,9 +71,11 @@ def compose_env(env, *wrappers, pad_episodes: bool = True):
         classes.insert(0, StandardizeWrapper)
 
     # vectorized envs get standardized episode padding + a persistent final_observation
+    # (autoresetting envs re-emit the true terminal obs, so no padding for those)
 
     if pad_episodes and EpisodePaddingWrapper not in classes and is_vectorized(env):
-        funcs.insert(1, EpisodePaddingWrapper)
+        pad_wrapper = partial(EpisodePaddingWrapper, pad_autoreset = not env_autoresets(env))
+        funcs.insert(1, pad_wrapper)
         classes.insert(1, EpisodePaddingWrapper)
 
     from ..memory_trace import MemoryTraceWrapper

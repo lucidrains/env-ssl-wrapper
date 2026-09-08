@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from .helpers import EnvWrapper, exists, default
+from .helpers import EnvWrapper, exists, default, is_vectorized
 from .utils import compose_env
 
 class StandardizeEnvWrapper(EnvWrapper):
@@ -35,7 +35,7 @@ class StandardizeEnvWrapper(EnvWrapper):
         if exists(max_timesteps):
             wrappers.append(('time_limit', dict(max_timesteps = max_timesteps)))
 
-        if auto_batch:
+        if auto_batch and not is_vectorized(env):
             wrappers.append('auto_batch')
 
         if exists(device):

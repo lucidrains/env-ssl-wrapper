@@ -6,40 +6,23 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
 
-from .helpers import any_true, dones_of, exists, get_attr, instantiate_env, safe_close, truthy_attr
+from .helpers import (
+    any_true,
+    dones_of,
+    exists,
+    get_attr,
+    instantiate_env,
+    safe_close,
+    stack_trees,
+    truthy_attr,
+    _zero_leaf,
+)
 from .spaces import action_dim_of
 from .standardize_wrapper import StandardizeWrapper
 
 # leaf helpers
 
-def _zero_leaf(x):
-    if is_tensor(x):
-        return torch.zeros_like(x)
-    return np.zeros_like(x)
-
-def _stack_leaves(leaves):
-    if all(map(is_tensor, leaves)):
-        return torch.stack(leaves)
-    return np.stack(leaves)
-
-def _stack_trees(trees):
-    first = trees[0]
-
-    if is_tensor(first):
-        return torch.stack(trees)
-
-    if isinstance(first, np.ndarray):
-        return np.stack(trees)
-
-    if isinstance(first, dict):
-        return {key: _stack_trees([t[key] for t in trees]) for key in first}
-
-    if isinstance(first, tuple):
-        return tuple(_stack_trees([t[i] for t in trees]) for i in range(len(first)))
-
-    leaves = [tree_flatten(tree)[0] for tree in trees]
-    stacked = [_stack_leaves(col) for col in zip(*leaves)]
-    return tree_unflatten(stacked, tree_structure(trees[0]))
+_stack_trees = stack_trees
 
 def _merge_infos(infos):
     infos = [info if isinstance(info, dict) else {} for info in infos]

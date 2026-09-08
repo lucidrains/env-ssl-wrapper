@@ -8,7 +8,16 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from einops import rearrange
 
-from .helpers import EnvWrapper, copy_leaf, dones_of, env_autoresets, exists, is_vectorized, to_numpy
+from .helpers import (
+    EnvWrapper,
+    copy_leaf,
+    dones_of,
+    env_autoresets,
+    exists,
+    first_existing,
+    is_vectorized,
+    to_numpy
+)
 
 # helpers
 
@@ -60,10 +69,11 @@ def merge_final(current, value, mask):
 # class
 
 class EpisodePaddingWrapper(EnvWrapper):
-    def __init__(self, env):
+    def __init__(self, env, pad_autoreset: bool = True):
         super().__init__(env)
         self.is_vector = is_vectorized(env)
         self.autoreset = env_autoresets(env)
+        self.pad_autoreset = pad_autoreset
         self._last_obs = None
         self._is_done = None
         self._final_obs = None
@@ -97,15 +107,20 @@ class EpisodePaddingWrapper(EnvWrapper):
                 self._is_done |= mask
 
                 if newly.any():
-                    value = info['final_observation'] if 'final_observation' in info else self._last_obs
+                    final_val = first_existing(info, 'final_observation', 'final_obs')
+                    value = final_val if exists(final_val) else self._last_obs
 
                     if self._final_obs is None:
                         self._final_obs = tree_map(copy_leaf, value)
                     else:
                         self._final_obs = tree_map(partial(merge_final, mask = newly), self._final_obs, value)
 
-                obs = tree_map(partial(zero_mask, mask = mask), obs)
-                reward = zero_mask(reward, mask & ~newly, fill_scalar = 0.0)
+                # zero pad done slots — non-autoresetting envs stay frozen on the terminal transition,
+                # while autoresetting envs already re-emit the true terminal obs (unless told to pad anyway)
+
+                if not self.autoreset or self.pad_autoreset:
+                    obs = tree_map(partial(zero_mask, mask = mask), obs)
+                    reward = zero_mask(reward, mask & ~newly, fill_scalar = 0.0)
 
                 info['final_observation'] = self._final_obs
                 info['_final_observation'] = back_to_mask_type(dones, mask)

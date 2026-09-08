@@ -7,7 +7,18 @@ import torch
 from torch.utils._pytree import tree_map
 from einops import rearrange
 
-from .helpers import EnvWrapper, default, exists, first_existing, get_attr, is_array, is_scalar, is_tensor, is_vectorized
+from .helpers import (
+    FINAL_OBSERVATION_KEYS,
+    EnvWrapper,
+    default,
+    exists,
+    first_existing,
+    get_attr,
+    is_array,
+    is_scalar,
+    is_tensor,
+    is_vectorized,
+)
 from .spaces import space_from_action_spec
 
 # helper functions
@@ -202,7 +213,9 @@ class AutoBatchedWrapper(EnvWrapper):
 
         obs, reward, terminated, truncated, info = *maybe_expand_dim(out[:4]), out[4]
 
-        if isinstance(info, dict) and 'final_observation' in info:
-            info['final_observation'] = maybe_expand_dim(info['final_observation'])
+        if isinstance(info, dict):
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info:
+                    info[key] = maybe_expand_dim(info[key])
 
         return obs, reward, terminated, truncated, info
