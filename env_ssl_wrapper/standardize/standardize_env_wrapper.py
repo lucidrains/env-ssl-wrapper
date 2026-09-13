@@ -18,11 +18,11 @@ class StandardizeEnvWrapper(EnvWrapper):
         pad_episodes: bool = True,
         done_tracker: bool = True,
         flatten_obs: bool = False,
-        action_transform: bool = False,
+        action_transform: bool | dict = False,
         max_timesteps: int | None = None,
-        image_size: tuple[int, int] | None = None,
+        image_size: int | tuple[int, int] | None = None,
         lambdas: tuple[float, ...] | list[float] | None = None,
-        **kwargs
+        keys: str | tuple[str, ...] | None = None,
     ):
         wrappers = []
 
@@ -30,7 +30,8 @@ class StandardizeEnvWrapper(EnvWrapper):
             wrappers.append(('image', dict(image_size = image_size)))
 
         if action_transform:
-            wrappers.append('action_transform')
+            transform_kwargs = dict(auto = True) if action_transform is True else action_transform
+            wrappers.append(('action_transform', transform_kwargs))
 
         if exists(max_timesteps):
             wrappers.append(('time_limit', dict(max_timesteps = max_timesteps)))
@@ -45,7 +46,7 @@ class StandardizeEnvWrapper(EnvWrapper):
             wrappers.append('done_tracker')
 
         if exists(lambdas):
-            wrappers.append(('memory_trace', dict(lambdas = lambdas, **kwargs)))
+            wrappers.append(('memory_trace', dict(lambdas = lambdas, keys = keys)))
 
         if flatten_obs:
             wrappers.append('flatten_obs')

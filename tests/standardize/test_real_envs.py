@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import is_tensor
 
-from env_ssl_wrapper import compose_env
+from env_ssl_wrapper import StandardizeEnvWrapper, compose_env
 
 # real environments runnable on macOS — classic control, toy text, mujoco, dm_control
 # each must emit the same contract: float32 batch-first obs, float32 rewards, bool dones
@@ -176,6 +176,11 @@ def ant_maze():
     _register_robotics()
     return gym.make('AntMaze_UMaze-v3')
 
+def pusht():
+    pytest.importorskip('gym_pusht')
+    import gym_pusht
+    return gym.make('gym_pusht/PushT-v0', render_mode = 'rgb_array')
+
 def dmc_reacher():
     pytest.importorskip('dm_control')
     from dm_control import suite
@@ -196,6 +201,7 @@ ENVS = [
     frozenlake, taxi, blackjack,
     halfcheetah, ant, walker2d, reacher,
     pybullet_cartpole,
+    pusht,
     fetch_reach, fetch_push, fetch_pick_and_place, fetch_slide, hand_reach, point_maze, ant_maze,
     dmc_reacher, dmc_cartpole_swingup, dmc_cheetah
 ]
@@ -305,6 +311,86 @@ def test_real_env_rollout(env_fn):
     assert env.episode_lengths.shape == (num_envs,)
     assert (env.episode_lengths > 0).all()
 
+# gym_pusht — single env, Box(0, 512) actions, state obs by default; the image
+# wrapper renders through the env's own rgb_array surface, and action_transform
+# rescales canonical (0, 1) actions to the env's bounds
+
+def test_gym_pusht_standardize_env():
+    try:
+        raw = pusht()
+    except Exception as e:
+        pytest.skip(f'could not create env: {e}')
+
+    env = StandardizeEnvWrapper(raw, image_size = (64, 64), action_transform = True)
+
+    obs, info = env.reset(seed = 0)
+
+    assert set(obs) == {'state', 'image'}
+    assert obs['state'].shape == (1, 5)
+    assert obs['image'].shape == (1, 3, 64, 64)
+    assert obs['image'].dtype == torch.float32
+
+    done_seen = False
+    total_reward = torch.zeros(1)
+
+    for _ in range(300):
+        obs, reward, terminated, truncated, info = env.step(torch.rand(1, 2))
+
+        assert reward.shape == (1,)
+        assert terminated.dtype == torch.bool and truncated.dtype == torch.bool
+        total_reward += reward
+
+        if bool((terminated | truncated).any()):
+            done_seen = True
+
+            # terminal obs mirror the augmented stream
+            assert set(info['final_observation']) == {'state', 'image'}
+            assert info['final_observation']['image'].shape == (1, 3, 64, 64)
+            assert bool(info['_final_observation'])
+            break
+
+    assert done_seen
+    assert env.episode_lengths[0] == 300
+    assert total_reward.shape == (1,)
+
+def test_gym_pusht_vector_standardize_env():
+    pytest.importorskip('gym_pusht')
+    import gym_pusht
+    from gymnasium.vector import SyncVectorEnv
+
+    try:
+        raw = SyncVectorEnv([
+            lambda: gym.make('gym_pusht/PushT-v0', render_mode = 'rgb_array')
+            for _ in range(2)
+        ])
+    except Exception as e:
+        pytest.skip(f'could not create vector env: {e}')
+
+    env = StandardizeEnvWrapper(raw, image_size = (64, 64), action_transform = True)
+
+    obs, info = env.reset(seed = 42)
+
+    assert set(obs) == {'state', 'image'}
+    assert obs['state'].shape == (2, 5)
+    assert obs['image'].shape == (2, 3, 64, 64)
+    assert obs['image'].dtype == torch.float32
+
+    total_rewards = torch.zeros(2)
+
+    for _ in range(300):
+        if env.all_done:
+            break
+
+        obs, reward, terminated, truncated, info = env.step(torch.rand(2, 2))
+
+        assert reward.shape == (2,)
+        assert terminated.dtype == torch.bool and truncated.dtype == torch.bool
+        total_rewards += reward
+
+    assert (env.episode_lengths == 300).all()
+    assert total_rewards.shape == (2,)
+    assert (total_rewards >= 0.0).all()
+
 # pybullet — the legacy 4-tuple step is bridged into the canonical 5-tuple,
 # final_observation is injected, and seeding is standardized via the legacy
 # gym seed() protocol
@@ -341,3 +427,15 @@ def test_pybullet_cartpole_standardize_and_seed():
     env.seed(42)
     obs_b, _ = env.reset()
     assert torch.equal(obs_a, obs_b)
+
+# verify end-to-end learning convergence of vectorized PPO on standardized envs
+
+def test_vectorized_ppo_cartpole_learns():
+    import verify_ppo
+    ret = verify_ppo.train_vectorized_ppo_cartpole(total_steps = 12_000, target_return = 120.0)
+    assert ret > 50.0
+
+def test_vectorized_ppo_inverted_pendulum_learns():
+    import verify_ppo
+    ret = verify_ppo.train_vectorized_ppo_inverted_pendulum(total_steps = 15_000, target_return = 100.0)
+    assert ret > 30.0

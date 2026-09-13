@@ -1,31 +1,19 @@
 from __future__ import annotations
 
-import numpy as np
-import torch
-from torch import is_tensor
-
 from .helpers import (
     EnvWrapper,
     default,
     exists,
     first_existing,
     get_attr,
+    is_time_step,
+    normalize_reset_out,
+    normalize_step_out,
     safe_close,
     truthy_attr,
+    zero_like,
 )
 from .spaces import space_from_action_spec
-
-# helpers
-
-def zero_like(x):
-    if is_tensor(x):
-        return torch.zeros_like(x, dtype = torch.bool)
-
-    arr = np.asarray(x)
-    return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
-
-def is_time_step(out):
-    return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
 
 # base adapter
 
@@ -38,27 +26,10 @@ class BaseEnvAdapter:
         self.env = env
 
     def step(self, action) -> tuple:
-        out = self.env.step(action)
-        if is_time_step(out):
-            last = out.last() if callable(get_attr(out, 'last')) else out.step_type == 2
-            return out.observation, out.reward, last, False, dict(discount = out.discount)
-        if len(out) == 5:
-            obs, reward, term, trunc, info = out
-            return obs, reward, term, trunc, info if isinstance(info, dict) else {}
-        if len(out) in (3, 4):
-            obs, reward, done, *rest = out
-            info = rest[0] if rest and isinstance(rest[0], dict) else {}
-            return obs, reward, done, zero_like(done), info
-        raise ValueError(f'cannot standardize step output of length {len(out)}')
+        return normalize_step_out(self.env.step(action))
 
     def reset(self, **kwargs) -> tuple:
-        out = self.env.reset(**kwargs)
-        if is_time_step(out):
-            return out.observation, {}
-        if isinstance(out, tuple) and len(out) == 2:
-            obs, info = out
-            return obs, {} if info is None else (info if isinstance(info, dict) else {})
-        return out, {}
+        return normalize_reset_out(self.env.reset(**kwargs))
 
     def seed(self, seed: int):
         if callable(get_attr(self.env, 'seed')):
@@ -381,15 +352,16 @@ class GymnasiumAdapter(BaseEnvAdapter):
 
     @property
     def autoresets(self) -> bool:
-        if truthy_attr(first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode')):
-            return True
+        mode = first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode')
+
+        if exists(mode):
+            return truthy_attr(mode)
+
         try:
             from gymnasium.vector import VectorEnv
-            if isinstance(self.env, VectorEnv):
-                return True
+            return isinstance(self.env, VectorEnv)
         except ImportError:
-            pass
-        return False
+            return False
 
     def seed(self, seed: int):
         try:

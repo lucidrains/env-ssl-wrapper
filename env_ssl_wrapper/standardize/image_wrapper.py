@@ -6,8 +6,15 @@ import numpy as np
 
 from einops import rearrange
 
-from .helpers import EnvWrapper, env_render, env_render_mode, exists
-from .standardize_wrapper import normalize_reset_out, normalize_step_out
+from .helpers import (
+    FINAL_OBSERVATION_KEYS,
+    TransformObservationWrapper,
+    env_render,
+    env_render_mode,
+    exists,
+    normalize_reset_out,
+    normalize_step_out,
+)
 
 # helper functions
 
@@ -32,12 +39,19 @@ def render_frame(env, image_size = (64, 64), camera = None):
 
         img = env.render()
 
+    if isinstance(img, (list, tuple)):
+        img = np.ascontiguousarray(img)
+
     if isinstance(img, torch.Tensor):
         img = img.detach().cpu().numpy()
 
     img = np.ascontiguousarray(img)
     img = torch.from_numpy(img)
-    return rearrange(img, 'h w c -> 1 c h w')
+
+    if img.ndim == 4:
+        return rearrange(img, 'b h w c -> b c h w'), True
+
+    return rearrange(img, 'h w c -> 1 c h w'), False
 
 def process_image(
     img,
@@ -61,7 +75,7 @@ def process_image(
 
 # class
 
-class ImageObservationWrapper(EnvWrapper):
+class ImageObservationWrapper(TransformObservationWrapper):
     def __init__(
         self,
         env,
@@ -81,18 +95,21 @@ class ImageObservationWrapper(EnvWrapper):
         self.normalize_divisor = normalize_divisor
 
     def render_frame(self):
-        img = render_frame(self.env, image_size = self.image_size, camera = self.camera)
-        return process_image(
+        img, is_batched = render_frame(self.env, image_size = self.image_size, camera = self.camera)
+        processed = process_image(
             img,
             image_size = self.image_size,
             mode = self.mode,
             normalize = self.normalize,
             normalize_divisor = self.normalize_divisor
         )
+        return processed, is_batched
 
     def observation(self, obs):
-        img = self.render_frame()
-        img = rearrange(img, '1 c h w -> c h w')
+        img, is_batched = self.render_frame()
+
+        if not is_batched:
+            img = rearrange(img, '1 c h w -> c h w')
 
         if not isinstance(obs, dict):
             return dict(state = obs, **{self.image_key: img})
@@ -102,10 +119,23 @@ class ImageObservationWrapper(EnvWrapper):
 
         return {**obs, self.image_key: img}
 
+    def transform_obs(self, obs, done = None):
+        return self.observation(obs)
+
     def reset(self, **kwargs):
         obs, info = normalize_reset_out(self.env.reset(**kwargs))
         return self.observation(obs), info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
-        return self.observation(obs), reward, terminated, truncated, info
+        out = self.observation(obs)
+
+        # terminal obs are augmented in place, preserving whatever the sim
+        # or the padding wrapper froze as the true terminal observation
+
+        if isinstance(info, dict) and not self.autoresets:
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info and not (isinstance(info[key], dict) and self.image_key in info[key]):
+                    info[key] = self.observation(info[key])
+
+        return out, reward, terminated, truncated, info

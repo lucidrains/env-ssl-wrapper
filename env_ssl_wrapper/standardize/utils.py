@@ -25,29 +25,27 @@ WRAPPERS = dict(
     pad_episodes = EpisodePaddingWrapper
 )
 
+def get_wrapper(name):
+    if name in ('standardize_env', 'master'):
+        from .standardize_env_wrapper import StandardizeEnvWrapper
+        return StandardizeEnvWrapper
+
+    if name == 'memory_trace':
+        from ..memory_trace import MemoryTraceWrapper
+        return MemoryTraceWrapper
+
+    if name in WRAPPERS:
+        return WRAPPERS[name]
+
+    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "standardize_env"])}')
+
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):
-        if wrapper == 'memory_trace':
-            from ..memory_trace import MemoryTraceWrapper
-            wrapper = MemoryTraceWrapper
-        elif wrapper in ('standardize_env', 'master'):
-            from .standardize_env_wrapper import StandardizeEnvWrapper
-            wrapper = StandardizeEnvWrapper
-        elif wrapper not in WRAPPERS:
-            raise ValueError(f'unknown wrapper {wrapper!r} — choose from {sorted([*WRAPPERS, "memory_trace", "standardize_env"])}')
-        else:
-            wrapper = WRAPPERS[wrapper]
+        wrapper = get_wrapper(wrapper)
 
     if isinstance(wrapper, tuple):
         name, kwargs = wrapper
-        if name == 'memory_trace':
-            from ..memory_trace import MemoryTraceWrapper
-            wrapper = partial(MemoryTraceWrapper, **kwargs)
-        elif name in ('standardize_env', 'master'):
-            from .standardize_env_wrapper import StandardizeEnvWrapper
-            wrapper = partial(StandardizeEnvWrapper, **kwargs)
-        else:
-            wrapper = partial(WRAPPERS.get(name, name), **kwargs)
+        wrapper = partial(get_wrapper(name) if isinstance(name, str) else name, **kwargs)
 
     elif isinstance(wrapper, dict):
         raise ValueError("wrapper kwargs must be passed as (name, kwargs), e.g. ('tensor', dict(device = 'cpu'))")

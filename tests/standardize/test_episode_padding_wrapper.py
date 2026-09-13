@@ -311,6 +311,44 @@ def test_gymnasium_vector_autoreset():
     # autoreset envs revive the step after termination — padding only applies
     # while an env stays done (non-autoreset envs, covered by the mocks above)
 
+# autoreset envs revive every step, so consecutive terminations are all new
+# terminal transitions — rewards and final obs must track each one
+
+class AlwaysDoneVecEnv:
+    num_envs = 1
+    is_vector = True
+    autoresets = True
+
+    def __init__(self):
+        self.episode = 0
+
+    def reset(self, **kwargs):
+        self.episode = 0
+        return np.zeros((1, 2)), {}
+
+    def step(self, action):
+        self.episode += 1
+        info = dict(
+            final_observation = np.full((1, 2), float(self.episode)),
+            _final_observation = np.ones(1, dtype = bool)
+        )
+        return np.full((1, 2), self.episode + 100.), np.ones(1), np.ones(1, dtype = bool), np.zeros(1, dtype = bool), info
+
+def test_pad_autoreset_consecutive_terminations():
+    env = EpisodePaddingWrapper(AlwaysDoneVecEnv(), pad_autoreset = True)
+    env.reset()
+
+    rewards = []
+    finals = []
+
+    for _ in range(3):
+        obs, reward, terminated, truncated, info = env.step(np.zeros((1, 2)))
+        rewards.append(reward[0])
+        finals.append(info['final_observation'][0, 0])
+
+    assert rewards == [1.0, 1.0, 1.0]
+    assert finals == [1.0, 2.0, 3.0]
+
 def test_pad_autoreset_subsequent_terminations():
     env = EpisodePaddingWrapper(AutoresetVectorMockEnv())
     obs, info = env.reset()

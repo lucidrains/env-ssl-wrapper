@@ -21,7 +21,7 @@ env = StandardizeEnvWrapper(any_env)
 obs, info = env.reset() # torch.float32, batched
 
 while not env.all_done:
-    actions = torch.randint(0, 2, (8,))
+    actions = torch.randint(0, 2, (1,))
     obs, reward, terminated, truncated, info = env.step(actions)
 ```
 

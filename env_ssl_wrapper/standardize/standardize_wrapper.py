@@ -1,47 +1,15 @@
 from __future__ import annotations
 
-import numpy as np
-import torch
-from torch import is_tensor
-
-from .adapters import get_adapter, is_time_step, zero_like
+from .adapters import get_adapter
 from .helpers import (
     EnvWrapper,
     default,
     dones_of,
     exists,
-    get_attr,
     instantiate_env,
     mark_terminal_obs,
 )
 from .spaces import infer_observation_space, space_from_action_spec
-
-# helpers
-
-def normalize_reset_out(out):
-    if is_time_step(out):
-        return out.observation, {}
-
-    if isinstance(out, tuple) and len(out) == 2:
-        obs, info = out
-        return obs, {} if info is None else (info if isinstance(info, dict) else {})
-
-    return out, {}
-
-def normalize_step_out(out):
-    if is_time_step(out):
-        last = out.last() if callable(get_attr(out, 'last')) else out.step_type == 2
-        return out.observation, out.reward, last, False, dict(discount = out.discount)
-
-    if len(out) == 5:
-        return out
-
-    if len(out) in (3, 4):
-        obs, reward, done, *rest = out
-        info = rest[0] if rest and isinstance(rest[0], dict) else {}
-        return obs, reward, done, zero_like(done), info
-
-    raise ValueError(f'could not standardize step output of length {len(out)}')
 
 # class
 

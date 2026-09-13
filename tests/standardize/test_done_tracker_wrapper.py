@@ -6,6 +6,7 @@ import gymnasium as gym
 import pytest
 
 from env_ssl_wrapper import DoneTrackerWrapper, AutoBatchedWrapper, compose_env
+from env_ssl_wrapper.helpers import env_autoresets
 from env_ssl_wrapper.mocks import AutoresetVectorMockEnv, PufferVectorMockEnv
 
 def test_done_tracker_detects_autoreset():
@@ -39,6 +40,35 @@ class _DuckAutoresetEnv:
 def test_done_tracker_duck_typed_autoresets_flag():
     env = DoneTrackerWrapper(_DuckAutoresetEnv())
     assert env.autoreset
+
+# gymnasium's AutoresetMode.DISABLED is a truthy enum that means "off"
+
+def test_gymnasium_autoreset_disabled_detected():
+    from gymnasium.vector import AutoresetMode
+
+    raw = gym.make_vec(
+        'CartPole-v1',
+        num_envs = 2,
+        vectorization_mode = 'sync',
+        vector_kwargs = dict(autoreset_mode = AutoresetMode.DISABLED)
+    )
+
+    assert not env_autoresets(raw)
+
+    env = DoneTrackerWrapper(raw)
+    assert not env.autoreset
+
+def test_done_tracker_autoreset_info_needs_reset_consistent():
+    env = DoneTrackerWrapper(AutoresetVectorMockEnv())
+    env.reset()
+
+    while not env.all_done:
+        obs, reward, terminated, truncated, info = env.step(np.zeros((4, 2)))
+
+    # autoreset envs keep stepping, so the info flag must agree with the property
+    assert not env.needs_reset
+    assert info['needs_reset'] is False
+    assert info['all_done'] is True
 
 
 def test_done_tracker_auto_batch_single_env():

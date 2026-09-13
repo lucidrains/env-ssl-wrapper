@@ -20,6 +20,18 @@ def test_readme_standardize_env_wrapper():
         step_count += 1
     assert step_count == 5
 
+def test_standardize_env_wrapper_action_transform():
+    import numpy as np
+    from env_ssl_wrapper import StandardizeEnvWrapper
+    from env_ssl_wrapper.mocks import GymnasiumMockEnv
+
+    # action_transform = True rescales canonical (0, 1) actions to the env's bounds
+    env = StandardizeEnvWrapper(GymnasiumMockEnv(), action_transform = True)
+    env.reset()
+    env.step(torch.tensor([[0.5, 1.0]]))
+
+    assert np.allclose(env.unwrapped.last_action, [0.0, 1.0])
+
 def test_readme_usage_snippet():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 

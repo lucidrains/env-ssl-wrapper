@@ -22,8 +22,6 @@ from .standardize_wrapper import StandardizeWrapper
 
 # leaf helpers
 
-_stack_trees = stack_trees
-
 def _merge_infos(infos):
     infos = [info if isinstance(info, dict) else {} for info in infos]
 
@@ -38,7 +36,7 @@ def _merge_infos(infos):
     for key in keys:
         vals = [info[key] for info in infos]
         try:
-            out[key] = _stack_trees(vals)
+            out[key] = stack_trees(vals)
         except Exception:
             out[key] = np.array(vals, dtype = object)
 
@@ -276,7 +274,7 @@ class MultiprocessingVecEnv:
             _safe_send(conn, ('reset', kwargs))
 
         results = _recv_all(self._conns)
-        return _stack_trees([obs for obs, _ in results]), _merge_infos([info for _, info in results])
+        return stack_trees([obs for obs, _ in results]), _merge_infos([info for _, info in results])
 
     def step(self, actions):
         actions = _split_actions(actions, self.num_envs)
@@ -302,10 +300,10 @@ class MultiprocessingVecEnv:
                 for final, obs_i in zip(final_obs, obs)
             ]
 
-            info['final_observation'] = _stack_trees(final_obs)
+            info['final_observation'] = stack_trees(final_obs)
             info['_final_observation'] = done
 
-        return _stack_trees(obs), reward, terminated, truncated, info
+        return stack_trees(obs), reward, terminated, truncated, info
 
     def close(self):
         _shutdown(self._conns, self._procs)

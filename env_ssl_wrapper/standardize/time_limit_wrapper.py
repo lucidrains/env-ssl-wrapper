@@ -4,8 +4,18 @@ import numpy as np
 import torch
 from torch import is_tensor
 
-from .helpers import EnvWrapper, dones_of, env_num_envs, is_vectorized, mark_terminal_obs, to_numpy
-from .standardize_wrapper import normalize_reset_out, normalize_step_out
+from .helpers import (
+    EnvWrapper,
+    dones_of,
+    env_num_envs,
+    exists,
+    get_batch_size,
+    is_vectorized,
+    mark_terminal_obs,
+    normalize_reset_out,
+    normalize_step_out,
+    to_numpy,
+)
 
 def back_to_like(t, numpy_arr):
     if is_tensor(t):
@@ -44,8 +54,13 @@ class TimeLimitWrapper(EnvWrapper):
         self.t = np.zeros(self.num_envs, dtype = int)
 
     def reset(self, **kwargs):
+        obs, info = normalize_reset_out(self.env.reset(**kwargs))
+
+        if self.is_vector and exists(batch_size := get_batch_size(obs)):
+            self.num_envs = batch_size
+
         self.t = np.zeros(self.num_envs, dtype = int)
-        return normalize_reset_out(self.env.reset(**kwargs))
+        return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from torch.utils._pytree import tree_flatten
-
 from .auto_batched_wrapper import AutoBatchedWrapper
 from .helpers import (
     EnvWrapper,
@@ -11,26 +9,10 @@ from .helpers import (
     env_autoresets,
     env_num_envs,
     exists,
-    get_attr,
-    is_array,
+    get_batch_size,
     is_vectorized,
     to_numpy,
 )
-
-# helper functions
-
-def get_batch_size(tree) -> int | None:
-    leaves, _ = tree_flatten(tree)
-
-    if not leaves:
-        return None
-
-    first = leaves[0]
-
-    if is_array(first):
-        return len(first) if first.ndim > 0 else None
-
-    return len(first) if exists(get_attr(first, '__len__')) else None
 
 # classes
 
@@ -113,6 +95,6 @@ class DoneTrackerWrapper(EnvWrapper):
             info['episode_lengths'] = self.episode_lengths.copy()
 
             if self.all_done:
-                info.update(needs_reset = True, all_done = True)
+                info.update(needs_reset = self.needs_reset, all_done = True)
 
         return obs, reward, terminated, truncated, info

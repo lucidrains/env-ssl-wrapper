@@ -493,6 +493,34 @@ def test_time_limit_timer_resets_across_episodes():
     assert saw_truncated
     assert env.episode_lengths[0] == 5
 
+# time limit — the timer re-sizes when reset returns a different batch size
+
+class ResizeTimeLimitEnv:
+    is_vector = True
+    num_envs = 4
+
+    def __init__(self):
+        self.batch = 4
+
+    def reset(self, **kwargs):
+        return np.zeros((self.batch, 2)), {}
+
+    def step(self, action):
+        return (
+            np.zeros((self.batch, 2)), np.ones(self.batch),
+            np.zeros(self.batch, dtype = bool), np.zeros(self.batch, dtype = bool), {}
+        )
+
+def test_time_limit_batch_size_change_on_reset():
+    env = TimeLimitWrapper(ResizeTimeLimitEnv(), max_timesteps = 10)
+    env.reset()
+
+    env.env.batch = 2
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((2, 2)))
+    assert truncated.shape == (2,)
+
 # action transform — scalar (0-dim) float actions flow through auto rescaling,
 # for Box(shape = (), ...) scalar action spaces
 

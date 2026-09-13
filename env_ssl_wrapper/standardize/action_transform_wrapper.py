@@ -97,9 +97,14 @@ class ActionTransformWrapper(EnvWrapper):
         if was_scalar:
             t = rearrange(t, '-> 1')
 
-        dim = t.shape[-1]
-        low = np.broadcast_to(low, (dim,))
-        high = np.broadcast_to(high, (dim,))
+        # bounds may be unbatched (single_action_space) or already batched
+        # (vector envs exposing only a batched action_space)
+
+        if low.shape != t.shape and not (low.ndim > 0 and t.shape[-low.ndim:] == low.shape):
+            dim = t.shape[-1]
+            low = np.broadcast_to(low, (dim,))
+            high = np.broadcast_to(high, (dim,))
+
         valid = np.isfinite(low) & np.isfinite(high)
 
         if is_tensor(t):

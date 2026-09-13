@@ -22,8 +22,13 @@ def get_attr(obj, name, default = None):
         return default
 
 def truthy_attr(value):
-    # flags arrive as None, methods, numpy scalars — only honest truths count
+    # flags arrive as None, methods, numpy scalars — only honest truths count.
+    # gymnasium's AutoresetMode.DISABLED is a truthy enum that means "off"
+
     if not exists(value) or callable(value):
+        return False
+
+    if getattr(value, 'name', None) == 'DISABLED':
         return False
 
     try:
@@ -45,6 +50,19 @@ def first_existing(obj, *names):
 
 def is_scalar(v):
     return isinstance(v, (int, float, bool, np.number, np.bool_))
+
+def get_batch_size(tree) -> int | None:
+    leaves, _ = tree_flatten(tree)
+
+    if not leaves:
+        return None
+
+    first = leaves[0]
+
+    if is_array(first):
+        return len(first) if first.ndim > 0 else None
+
+    return len(first) if exists(get_attr(first, '__len__')) else None
 
 def is_array(v):
     return is_tensor(v) or isinstance(v, np.ndarray)
@@ -70,6 +88,43 @@ def dones_of(terminated, truncated):
     if not isinstance(terminated, (dict, list, tuple)):
         return terminated | truncated
     return tree_map(lambda a, b: a | b, terminated, truncated)
+
+# sim step / reset normalization
+
+def is_time_step(out):
+    return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
+
+def zero_like(x):
+    if is_tensor(x):
+        return torch.zeros_like(x, dtype = torch.bool)
+
+    arr = np.asarray(x)
+    return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
+
+def normalize_reset_out(out):
+    if is_time_step(out):
+        return out.observation, {}
+
+    if isinstance(out, tuple) and len(out) == 2:
+        obs, info = out
+        return obs, {} if info is None else (info if isinstance(info, dict) else {})
+
+    return out, {}
+
+def normalize_step_out(out):
+    if is_time_step(out):
+        last = out.last() if callable(get_attr(out, 'last')) else out.step_type == 2
+        return out.observation, out.reward, last, False, dict(discount = out.discount)
+
+    if len(out) == 5:
+        return out
+
+    if len(out) in (3, 4):
+        obs, reward, done, *rest = out
+        info = rest[0] if rest and isinstance(rest[0], dict) else {}
+        return obs, reward, done, zero_like(done), info
+
+    raise ValueError(f'could not standardize step output of length {len(out)}')
 
 def _zero_leaf(x):
     if is_tensor(x):
@@ -272,15 +327,10 @@ class TransformObservationWrapper(EnvWrapper):
         self.takes_done = accepts_done_param(self.transform_obs)
 
     def transform_obs(self, obs, done = None):
-        if hasattr(self, 'observation'):
-            return self.observation(obs)
         return obs
 
     def transform(self, obs, done = None):
         return self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
-
-    def observation(self, obs):
-        return self.transform_obs(obs)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

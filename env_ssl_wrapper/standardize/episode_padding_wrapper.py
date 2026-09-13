@@ -21,15 +21,18 @@ from .helpers import (
 
 # helpers
 
+def broadcast_mask(mask, x):
+    if not is_tensor(x):
+        return mask
+
+    m = torch.as_tensor(mask, device = x.device, dtype = torch.bool)
+    diff = x.ndim - m.ndim
+
+    return rearrange(m, f'... -> ... {" ".join(["1"] * diff)}') if diff > 0 else m
+
 def zero_mask(x, mask, fill_scalar = None):
     if is_tensor(x):
-        m = torch.as_tensor(mask, device = x.device, dtype = torch.bool)
-        diff = x.ndim - m.ndim
-
-        if diff > 0:
-            m = rearrange(m, f'... -> ... {" ".join(["1"] * diff)}')
-
-        return torch.where(m, torch.zeros_like(x), x)
+        return torch.where(broadcast_mask(mask, x), torch.zeros_like(x), x)
 
     arr = np.asarray(x)
 
@@ -49,13 +52,7 @@ def back_to_mask_type(dones, newly):
 
 def merge_final(current, value, mask):
     if is_tensor(current):
-        m = torch.as_tensor(mask, device = current.device, dtype = torch.bool)
-        diff = current.ndim - m.ndim
-
-        if diff > 0:
-            m = rearrange(m, f'... -> ... {" ".join(["1"] * diff)}')
-
-        return torch.where(m, value, current)
+        return torch.where(broadcast_mask(mask, current), value, current)
 
     curr = np.asarray(current)
 
@@ -97,14 +94,14 @@ class EpisodePaddingWrapper(EnvWrapper):
             if self._is_done is None or len(self._is_done) != len(mask):
                 self._is_done = np.zeros(len(mask), dtype = bool)
 
-            if self.autoreset:
-                self._is_done &= mask
+            # autoreset envs revive every done slot, so each done is a new
+            # terminal transition; non-autoreset slots stay done until reset
+
+            newly = mask if self.autoreset else mask & ~self._is_done
+            self._is_done |= mask
 
             if mask.any():
                 assert exists(self._last_obs), 'environment needs reset before calling step. call env.reset() first'
-
-                newly = mask & ~self._is_done
-                self._is_done |= mask
 
                 if newly.any():
                     final_val = first_existing(info, 'final_observation', 'final_obs')

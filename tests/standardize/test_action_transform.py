@@ -106,6 +106,64 @@ def test_auto_rescale_discrete_passthrough():
 
     assert env.unwrapped.last_action == 1
 
+def test_auto_rescale_batched_action_space():
+    # vector envs exposing only a batched action_space still rescale correctly
+
+    class BatchedSpaceEnv:
+        num_envs = 2
+        is_vector = True
+
+        class Space:
+            shape = (2, 3)
+            low = np.full((2, 3), -1.0)
+            high = np.full((2, 3), 1.0)
+
+        action_space = Space()
+
+        def __init__(self):
+            self.unwrapped = self
+
+        def reset(self, **kwargs):
+            return np.zeros((2, 3)), {}
+
+        def step(self, action):
+            self.last_action = action
+            return np.zeros((2, 3)), np.ones(2), np.zeros(2, dtype = bool), np.zeros(2, dtype = bool), {}
+
+    env = ActionTransformWrapper(BatchedSpaceEnv(), auto = True)
+    env.step(torch.full((2, 3), 0.5))
+
+    assert np.allclose(env.unwrapped.last_action, np.zeros((2, 3)))
+
+def test_auto_rescale_multidimensional_action_space():
+    # matrix action spaces (e.g. shape (2, 2)) batched with shape (1, 2, 2) rescale without error
+
+    class MatrixActionEnv:
+        num_envs = 1
+        is_vector = True
+
+        class Space:
+            shape = (2, 2)
+            low = np.full((2, 2), -1.0)
+            high = np.full((2, 2), 1.0)
+
+        action_space = Space()
+
+        def __init__(self):
+            self.unwrapped = self
+
+        def reset(self, **kwargs):
+            return np.zeros((1, 2, 2)), {}
+
+        def step(self, action):
+            self.last_action = action
+            return np.zeros((1, 2, 2)), np.ones(1), np.zeros(1, dtype = bool), np.zeros(1, dtype = bool), {}
+
+    env = ActionTransformWrapper(MatrixActionEnv(), auto = True)
+    env.step(torch.full((1, 2, 2), 0.5))
+
+    assert np.allclose(env.unwrapped.last_action, np.zeros((1, 2, 2)))
+
 def test_auto_rescale_dm_control_action_spec():
     env = ActionTransformWrapper(DMControlMockEnv(), auto = True)
     env.step(np.array([0.0, 1.0], dtype = np.float32))
