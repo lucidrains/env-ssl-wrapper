@@ -45,7 +45,7 @@ class ActionChunkWrapper(EnvWrapper):
         gamma = default(discount, gamma)
         assert chunk_len >= 1, f'chunk_len must be at least 1, got {chunk_len}'
         assert 0. <= gamma <= 1., f'gamma must be between 0 and 1, got {gamma}'
-        assert reward_mode in ('sum', 'mean', 'last'), f'unknown reward_mode {reward_mode!r}'
+        assert reward_mode in ('sum', 'mean', 'last', 'chunk'), f'unknown reward_mode {reward_mode!r}'
 
         self.chunk_len = chunk_len
         self.gamma = float(gamma)
@@ -93,7 +93,9 @@ class ActionChunkWrapper(EnvWrapper):
         rewards = stack_steps(rewards)
         executed_len = rewards.shape[-1]
 
-        if self.reward_mode == 'last':
+        if self.reward_mode == 'chunk':
+            reward = rewards
+        elif self.reward_mode == 'last':
             reward = rewards[..., -1]
         elif self.reward_mode == 'mean':
             reward = reduce(rewards, '... k -> ...', 'mean')

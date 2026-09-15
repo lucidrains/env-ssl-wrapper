@@ -77,6 +77,29 @@ def test_action_chunk_invalid_reward_mode():
     with pytest.raises(AssertionError):
         ActionChunkWrapper(StepEnv(), chunk_len = 2, reward_mode = 'median')
 
+def test_action_chunk_reward_chunk_mode():
+    env = ActionChunkWrapper(StepEnv(), chunk_len = 2, gamma = 0.9, reward_mode = 'chunk')
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.array([[0, 1]]))
+
+    # raw per-step rewards are returned as the reward chunk, undiscounted
+    assert reward.shape == (2,)
+    assert np.allclose(reward, [1.0, 2.0])
+    assert np.allclose(info['chunk_rewards'], [1.0, 2.0])
+    assert info['chunk_length'] == 2
+
+def test_action_chunk_reward_chunk_vector_early_stop():
+    mock = VectorStepEnv(terminate_at = (2, 10, 10))
+    env = ActionChunkWrapper(mock, chunk_len = 3, reward_mode = 'chunk')
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((3, 3), dtype = int))
+
+    assert reward.shape == (3, 2)
+    assert np.allclose(reward, np.ones((3, 2)))
+    assert info['chunk_length'] == 2
+
 def test_action_chunk_discounted_reward():
     env = ActionChunkWrapper(StepEnv(), chunk_len = 2, gamma = 0.9)
     env.reset()
@@ -268,6 +291,19 @@ def test_action_chunk_standardize_wrapper_arg():
 
     assert info['chunk_length'] == 2
     assert abs(info['discount'] - 0.95 ** 2) < 1e-6
+
+def test_action_chunk_standardize_wrapper_reward_chunk():
+    env = StandardizeEnvWrapper(
+        gym.make('CartPole-v1'),
+        chunk_len = 2,
+        chunk_reward_mode = 'chunk'
+    )
+    obs, _ = env.reset(seed = 0)
+    obs, reward, terminated, truncated, info = env.step(torch.randint(0, 2, (1, 2)))
+
+    assert info['chunk_length'] == 2
+    assert reward.shape == (1, 2)
+    assert torch.allclose(reward, info['chunk_rewards'])
 
 def test_action_chunk_matches_per_step_discounted():
     seed = 42

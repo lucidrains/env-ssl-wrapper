@@ -104,6 +104,8 @@ Execution stops early the moment any env terminates or truncates mid-chunk — t
 
 Pass `gamma` (default `1.`) to discount intra-chunk rewards $r = \sum_{i=0}^{L-1} \gamma^i r_i$. The macro-transition discount factor to the next state is provided as `info['discount'] = gamma ** chunk_length`. `reward_mode` can also be `'mean'` or `'last'`.
 
+Set `reward_mode = 'chunk'` to get the raw per-step rewards back as a reward chunk of shape `(num_envs, chunk_length)` (`(chunk_length,)` for a single env) instead of a reduced scalar — useful when a learner wants to do per-step credit assignment within the chunk. The chunk is truncated to the number of substeps actually executed (`info['chunk_length']`) and is undiscounted, so `gamma` only affects the aggregated modes.
+
 Can also be passed directly to `StandardizeEnvWrapper` or `compose_env`:
 
 ```python
