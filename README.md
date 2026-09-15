@@ -71,6 +71,53 @@ Run the PPO benchmark on POMDP LunarLander:
 uv run test_memory_trace.py
 ```
 
+### Action Chunk
+
+Open-loop action chunking: one `step` executes a whole chunk of actions and returns only the final state, temporally compressing the environment by the chunk length.
+
+```python
+import gymnasium as gym
+import torch
+from env_ssl_wrapper import StandardizeEnvWrapper, ActionChunkWrapper
+
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+env = ActionChunkWrapper(env, chunk_len = 2, gamma = 0.99)
+
+obs, info = env.reset()
+
+while True:
+    actions = torch.randint(0, 2, (1, 2))  # (num_envs, chunk_len)
+    obs, reward, terminated, truncated, info = env.step(actions)
+
+    # reward                -> discounted sum of substeps (r0 + gamma * r1 + ...)
+    # info['discount']      -> gamma ** chunk_length (macro-step discount for GAE / Bellman target)
+    # info['chunk_length']  -> env steps actually executed (drops below chunk_len on terminal chunk)
+    # info['chunk_rewards'] -> (1, chunk_length) raw per-step rewards
+
+    if bool((terminated | truncated).item()):
+        obs, info = env.reset()
+```
+
+Chunks are shaped `(num_envs, chunk_len, *action_shape)` (`(num_envs, chunk_len)` for discrete actions).
+
+Execution stops early the moment any env terminates or truncates mid-chunk — the terminal state and done flags of that substep are returned and the rest of the chunk is dropped, so a new episode is never silently advanced.
+
+Pass `gamma` (default `1.`) to discount intra-chunk rewards $r = \sum_{i=0}^{L-1} \gamma^i r_i$. The macro-transition discount factor to the next state is provided as `info['discount'] = gamma ** chunk_length`. `reward_mode` can also be `'mean'` or `'last'`.
+
+Can also be passed directly to `StandardizeEnvWrapper` or `compose_env`:
+
+```python
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2, chunk_gamma = 0.99)
+```
+
+Run the chunked PPO benchmark on CartPole, or check chunked rollouts against a per-step reference:
+
+```bash
+uv run test_action_chunk.py --chunk_len=2                # PPO on CartPole
+uv run test_action_chunk.py --sweep=True                 # PPO over several chunk lengths
+uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts match per-step reference
+```
+
 ## Wrappers
 
 Pass wrappers as strings (default config) or `(name, dict)` tuples (custom config), in any order.
@@ -85,6 +132,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `action_transform` | Rescales actions from a canonical `(0, 1)` range to the env's bounds. |
 | `tensor` | NumPy → torch on a device, torch actions → numpy for the sim. |
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
+| `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
 
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.
 

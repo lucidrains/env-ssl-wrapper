@@ -187,3 +187,27 @@ def test_readme_memory_trace_snippet():
     assert 'obs' in obs and 'trace_0.9' in obs and 'trace_0.99' in obs
     assert obs['obs'].shape == (1, 4)
     assert obs['trace_0.9'].shape == (1, 4)
+
+def test_readme_action_chunk_snippet():
+    from env_ssl_wrapper import StandardizeEnvWrapper, ActionChunkWrapper
+
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    env = ActionChunkWrapper(env, chunk_len = 2, gamma = 0.99)
+
+    obs, info = env.reset()
+
+    step_count = 0
+    while step_count < 5:
+        actions = torch.randint(0, 2, (1, 2))
+        obs, reward, terminated, truncated, info = env.step(actions)
+
+        assert obs.shape == (1, 4)
+        assert reward.shape == (1,)
+        assert 1 <= info['chunk_length'] <= 2
+        assert abs(info['discount'] - 0.99 ** info['chunk_length']) < 1e-6
+        assert info['chunk_rewards'].shape == (1, info['chunk_length'])
+
+        if bool((terminated | truncated).item()):
+            obs, info = env.reset()
+
+        step_count += 1

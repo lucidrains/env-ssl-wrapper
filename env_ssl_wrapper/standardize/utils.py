@@ -34,10 +34,14 @@ def get_wrapper(name):
         from ..memory_trace import MemoryTraceWrapper
         return MemoryTraceWrapper
 
+    if name in ('action_chunk', 'chunk'):
+        from ..action_chunk import ActionChunkWrapper
+        return ActionChunkWrapper
+
     if name in WRAPPERS:
         return WRAPPERS[name]
 
-    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "standardize_env"])}')
+    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "standardize_env"])}')
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):
@@ -86,6 +90,14 @@ def compose_env(env, *wrappers, pad_episodes: bool = True):
             idx_ten = classes.index(TensorWrapper)
             funcs.insert(idx_ten + 1, f)
             classes.insert(idx_ten + 1, c)
+
+    # action chunking changes the step signature, so it always goes outermost
+
+    from ..action_chunk import ActionChunkWrapper
+    if ActionChunkWrapper in classes:
+        idx_chunk = classes.index(ActionChunkWrapper)
+        funcs.append(funcs.pop(idx_chunk))
+        classes.append(classes.pop(idx_chunk))
 
     assert len(set(classes)) == len(classes), 'duplicate wrappers found'
 

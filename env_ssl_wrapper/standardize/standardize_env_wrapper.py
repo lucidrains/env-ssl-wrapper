@@ -23,6 +23,9 @@ class StandardizeEnvWrapper(EnvWrapper):
         image_size: int | tuple[int, int] | None = None,
         lambdas: tuple[float, ...] | list[float] | None = None,
         keys: str | tuple[str, ...] | None = None,
+        chunk_len: int | None = None,
+        chunk_gamma: float = 1.,
+        chunk_reward_mode: str = 'sum',
     ):
         wrappers = []
 
@@ -47,6 +50,9 @@ class StandardizeEnvWrapper(EnvWrapper):
 
         if exists(lambdas):
             wrappers.append(('memory_trace', dict(lambdas = lambdas, keys = keys)))
+
+        if exists(chunk_len):
+            wrappers.append(('action_chunk', dict(chunk_len = chunk_len, gamma = chunk_gamma, reward_mode = chunk_reward_mode)))
 
         if flatten_obs:
             wrappers.append('flatten_obs')
