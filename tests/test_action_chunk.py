@@ -335,6 +335,46 @@ def test_action_chunk_wrong_chunk_length():
     with pytest.raises(AssertionError):
         env.step(np.zeros(2, dtype = int))
 
+@pytest.mark.parametrize('use_torch', [False, True])
+def test_action_chunk_snapshots_reused_rewards(use_torch):
+    class ReusedRewardEnv(StepEnv):
+        def __init__(self):
+            super().__init__()
+            self.reward = torch.zeros(1) if use_torch else np.zeros(1)
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            self.reward[...] = reward
+            return obs, self.reward, terminated, truncated, info
+
+    env = ActionChunkWrapper(ReusedRewardEnv(), chunk_len = 3)
+    env.reset()
+    _, reward, _, _, info = env.step(np.zeros((1, 3), dtype = int))
+
+    assert float(reward[0]) == 6.
+    assert np.allclose(info['chunk_rewards'], [[1., 2., 3.]])
+
+@pytest.mark.parametrize('use_torch', [False, True])
+def test_action_chunk_snapshots_reused_rewards_vectorized(use_torch):
+    class ReusedRewardVectorEnv(VectorStepEnv):
+        def __init__(self):
+            super().__init__(terminate_at = (10, 10, 10))
+            self.reward = torch.zeros(3) if use_torch else np.zeros(3)
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            r = torch.from_numpy(reward).float() if use_torch else reward
+            self.reward[...] = r
+            return obs, self.reward, terminated, truncated, info
+
+    env = ActionChunkWrapper(ReusedRewardVectorEnv(), chunk_len = 3)
+    env.reset()
+    _, reward, _, _, info = env.step(np.zeros((3, 3), dtype = int))
+
+    assert np.allclose(reward, [3., 3., 3.])
+    assert np.allclose(info['chunk_rewards'], [[1., 1., 1.], [1., 1., 1.], [1., 1., 1.]])
+
+
 def test_action_chunk_all_export():
     import env_ssl_wrapper
     assert 'ActionChunkWrapper' in env_ssl_wrapper.__all__

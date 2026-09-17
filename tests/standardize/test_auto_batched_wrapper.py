@@ -377,6 +377,29 @@ def test_dict_action_heuristic_fallback():
     assert isinstance(squeezed['discrete'], int) and squeezed['discrete'] == 0
     assert squeezed['continuous'].shape == (1,)
 
+def test_dict_action_shapes_follow_keys_not_insertion_order():
+    actions = {'vector': np.array([[1., 2.]]), 'scalar': np.array([3])}
+    shapes = {'scalar': (), 'vector': (2,)}
+    result = maybe_squeeze_dim(actions, shape_tree = shapes)
+
+    assert result['scalar'] == 3
+    assert np.array_equal(result['vector'], [1., 2.])
+
+def test_action_structure_mismatch_raises():
+    import pytest
+
+    with pytest.raises(AssertionError, match = 'dict action space'):
+        maybe_squeeze_dim([1], shape_tree = {'scalar': ()})
+
+    with pytest.raises(AssertionError, match = 'dict action space'):
+        maybe_squeeze_dim({'wrong_key': 1}, shape_tree = {'scalar': ()})
+
+    with pytest.raises(AssertionError, match = 'tuple action space'):
+        maybe_squeeze_dim({'scalar': 1}, shape_tree = [()])
+
+    with pytest.raises(AssertionError, match = 'tuple action space'):
+        maybe_squeeze_dim([1, 2], shape_tree = [()])
+
 # namedtuples survive as namedtuples — leaves shaped in place
 
 def test_namedtuple_action_preserved():

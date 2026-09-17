@@ -41,6 +41,7 @@ def test_partial_wrapper_subsets(wrappers, expect_torch, expect_batched, expect_
     assert is_tensor(reward) == expect_torch
     assert ('episode_lengths' in info) == expect_tracked
 
+
 def test_standardize_only_no_wrappers():
     env = compose_env(GymnasiumMockEnv())
 

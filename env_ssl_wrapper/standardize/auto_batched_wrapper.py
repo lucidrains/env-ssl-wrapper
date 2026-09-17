@@ -153,18 +153,14 @@ def is_numeric_container(x):
 def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = False):
     # reshape actions to match the env's space, falling back to heuristics
 
-    if isinstance(shape_tree, (list, dict)):
-        keyed = isinstance(shape_tree, dict)
+    if isinstance(shape_tree, dict):
+        assert isinstance(x, dict) and x.keys() == shape_tree.keys(), 'action structure does not match its dict action space'
+        return {key: maybe_squeeze_dim(child, shape_tree[key], is_vector, prepend_batch) for key, child in x.items()}
 
-        ok = x.keys() == shape_tree.keys() if keyed else isinstance(x, (list, tuple)) and len(x) == len(shape_tree)
-        assert ok, f'action structure does not match its {"dict" if keyed else "tuple"} action space'
-
-        children = list(x.values()) if keyed else list(x)
-        subtrees = list(shape_tree.values()) if keyed else shape_tree
-
-        leaves = [maybe_squeeze_dim(child, subtree, is_vector, prepend_batch) for child, subtree in zip(children, subtrees)]
-
-        return dict(zip(x.keys(), leaves)) if keyed else rebuild_container(x, leaves)
+    if isinstance(shape_tree, list):
+        assert isinstance(x, (list, tuple)) and len(x) == len(shape_tree), 'action structure does not match its tuple action space'
+        leaves = [maybe_squeeze_dim(child, subtree, is_vector, prepend_batch) for child, subtree in zip(x, shape_tree)]
+        return rebuild_container(x, leaves)
 
     # leaf-shaped tree — claims the whole input
 

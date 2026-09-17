@@ -7,7 +7,7 @@ from torch import is_tensor
 
 from .standardize.helpers import (
     EnvWrapper,
-    exists,
+    copy_leaf,
     default,
     any_true,
     dones_of,
@@ -83,7 +83,7 @@ class ActionChunkWrapper(EnvWrapper):
 
         for action in chunk_steps(actions, chunk_axis):
             out = self.env.step(action)
-            rewards.append(out[1])
+            rewards.append(copy_leaf(out[1]))
 
             if any_true(dones_of(out[2], out[3])):
                 break
