@@ -8,6 +8,7 @@
 #     "torch",
 #     "torch-einops-utils",
 #     "x-mlps-pytorch",
+#     "x-ppo>=0.0.7",
 # ]
 # ///
 
@@ -23,26 +24,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from x_mlps_pytorch import MLP
+from x_ppo import calc_gae, ppo_actor_loss
 
 from env_ssl_wrapper import (
     StandardizeEnvWrapper,
     MemoryTraceWrapper,
     TransformObservationWrapper,
 )
-
-def compute_gae(rewards, values, episode_continues, final_next_value, gamma = 0.99, gae_lambda = 0.95):
-    advantages = torch.zeros_like(rewards)
-    accumulated_advantage = 0.
-
-    num_steps = len(rewards)
-    for step in reversed(range(num_steps)):
-        next_val = values[step + 1] if step + 1 < num_steps else final_next_value
-        temporal_diff_error = rewards[step] + gamma * next_val * episode_continues[step] - values[step]
-        accumulated_advantage = temporal_diff_error + gamma * gae_lambda * episode_continues[step] * accumulated_advantage
-        advantages[step] = accumulated_advantage
-
-    target_returns = advantages + values
-    return advantages, target_returns
 
 class MaskObsWrapper(TransformObservationWrapper):
     def __init__(self, env, indices):
@@ -172,13 +160,15 @@ def train_ppo(
             last_obs_tensor = current_obs
             final_next_val = value_network(last_obs_tensor).item()
 
-            advantages, target_returns = compute_gae(
+            target_returns, advantages = calc_gae(
                 rewards_batch,
                 values_batch,
-                masks_batch,
-                final_next_val,
+                masks = masks_batch,
                 gamma = gamma,
-                gae_lambda = gae_lambda
+                lam = gae_lambda,
+                next_value = final_next_val,
+                use_accelerated = False,
+                return_advantages = True
             )
 
             if advantages.std() > 1e-4:
@@ -204,10 +194,12 @@ def train_ppo(
                 new_log_probs = dist.log_prob(sub_actions)
                 entropy = dist.entropy().mean()
 
-                ratio = torch.exp(new_log_probs - sub_old_log_probs)
-                surrogate1 = ratio * sub_advantages
-                surrogate2 = torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio) * sub_advantages
-                policy_loss = -torch.min(surrogate1, surrogate2).mean()
+                policy_loss = ppo_actor_loss(
+                    new_log_probs,
+                    sub_old_log_probs,
+                    sub_advantages,
+                    eps_clip = clip_ratio
+                ).mean()
 
                 predicted_values = value_network(sub_obs).view_as(sub_target_returns)
                 value_loss = F.mse_loss(predicted_values, sub_target_returns)

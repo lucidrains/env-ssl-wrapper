@@ -8,6 +8,7 @@
 #     "torch",
 #     "torch-einops-utils",
 #     "x-mlps-pytorch",
+#     "x-ppo>=0.0.7",
 # ]
 # ///
 
@@ -22,7 +23,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from torch_einops_utils import masked_mean
 from x_mlps_pytorch import MLP
+from x_ppo import calc_gae, ppo_actor_loss
 
 from env_ssl_wrapper import StandardizeEnvWrapper, ActionChunkWrapper
 
@@ -30,24 +33,6 @@ from env_ssl_wrapper import StandardizeEnvWrapper, ActionChunkWrapper
 
 def exists(val):
     return val is not None
-
-def compute_gae(
-    rewards,
-    values,
-    next_values,
-    discounts,
-    masks,
-    gae_lambda = 0.95
-):
-    advantages = torch.zeros_like(values)
-    acc = 0.
-
-    for t in reversed(range(len(values))):
-        delta = rewards[t] + discounts[t] * next_values[t] * masks[t] - values[t]
-        acc = delta + discounts[t] * gae_lambda * masks[t] * acc
-        advantages[t] = acc
-
-    return advantages, advantages + values
 
 # ppo training
 
@@ -159,13 +144,15 @@ def train_ppo(
             values = torch.stack(rollout_values).view(-1)
             next_values = torch.cat([values[1:], final_next_val.view(1)])
 
-            macro_adv, macro_returns = compute_gae(
+            macro_returns, macro_adv = calc_gae(
                 macro_rewards,
                 values,
-                next_values,
-                macro_discounts,
-                masks,
-                gae_lambda
+                masks = masks,
+                gamma = macro_discounts,
+                lam = gae_lambda,
+                next_values = next_values,
+                use_accelerated = False,
+                return_advantages = True
             )
 
             if macro_adv.std() > 1e-4:
@@ -201,13 +188,15 @@ def train_ppo(
             step_masks = torch.tensor(step_masks)
             step_discounts = torch.full_like(step_values, gamma)
 
-            step_adv, step_returns = compute_gae(
+            step_returns, step_adv = calc_gae(
                 step_rewards,
                 step_values,
-                step_next_values,
-                step_discounts,
-                step_masks,
-                gae_lambda
+                masks = step_masks,
+                gamma = step_discounts,
+                lam = gae_lambda,
+                next_values = step_next_values,
+                use_accelerated = False,
+                return_advantages = True
             )
 
             if step_adv.std() > 1e-4:
@@ -235,16 +224,17 @@ def train_ppo(
                 sub_old_lp = log_probs_batch[mb]
                 sub_adv = adv[mb]
                 sub_mask = mask[mb]
-                denom = sub_mask.sum().clamp(min = 1)
-
                 dist = Categorical(logits = policy(sub_obs).view(-1, chunk_len, num_actions))
                 new_lp = dist.log_prob(sub_actions)
 
-                ratio = torch.exp(new_lp - sub_old_lp)
-                surr1 = ratio * sub_adv
-                surr2 = torch.clamp(ratio, 1. - clip_ratio, 1. + clip_ratio) * sub_adv
-                policy_loss = -(torch.min(surr1, surr2) * sub_mask).sum() / denom
-                entropy = (dist.entropy() * sub_mask).sum() / denom
+                policy_loss = ppo_actor_loss(
+                    new_lp,
+                    sub_old_lp,
+                    sub_adv,
+                    eps_clip = clip_ratio,
+                    mask = sub_mask
+                )
+                entropy = masked_mean(dist.entropy(), mask = sub_mask)
 
                 pred_val = critic(sub_obs)
                 target_val = returns[mb]
@@ -252,7 +242,7 @@ def train_ppo(
                 if critic_mode == 'single':
                     value_loss = F.mse_loss(pred_val.view_as(target_val), target_val)
                 else:
-                    value_loss = (((pred_val - target_val) ** 2) * sub_mask).sum() / denom
+                    value_loss = masked_mean((pred_val - target_val) ** 2, mask = sub_mask)
 
                 loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
 
