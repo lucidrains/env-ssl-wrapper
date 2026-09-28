@@ -335,6 +335,52 @@ def test_action_chunk_wrong_chunk_length():
     with pytest.raises(AssertionError):
         env.step(np.zeros(2, dtype = int))
 
+# plain single environments — no auto-batching in the stack
+
+def test_action_chunk_plain_single_env():
+    env = ActionChunkWrapper(gym.make('CartPole-v1'), chunk_len = 2)
+    obs, _ = env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(np.array([[0, 0]]))
+
+    assert obs.shape == (4,)
+    assert info['chunk_length'] == 2
+    assert float(np.sum(reward)) == 2.
+    assert np.allclose(info['chunk_rewards'], [1., 1.])
+
+def test_action_chunk_plain_single_env_box():
+    env = ActionChunkWrapper(gym.make('Pendulum-v1'), chunk_len = 2)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((1, 2, 1)))
+
+    assert obs.shape == (3,)
+    assert info['chunk_length'] == 2
+    assert info['chunk_rewards'].shape == (2,)
+
+def test_action_chunk_plain_env_matches_per_step():
+    seed = 0
+    actions = np.array([[0, 1]])
+
+    ref = gym.make('CartPole-v1')
+    ref.reset(seed = seed)
+
+    env = ActionChunkWrapper(gym.make('CartPole-v1'), chunk_len = 2)
+    env.reset(seed = seed)
+
+    ref_obs = None
+    expected_reward = 0.
+
+    for action in actions[0]:
+        ref_obs, ref_reward, _, _, _ = ref.step(action)
+        expected_reward += ref_reward
+
+    obs, reward, terminated, truncated, info = env.step(actions)
+
+    assert np.allclose(obs, ref_obs)
+    assert abs(float(np.sum(reward)) - expected_reward) < 1e-6
+    assert not bool(terminated) and not bool(truncated)
+
 @pytest.mark.parametrize('use_torch', [False, True])
 def test_action_chunk_snapshots_reused_rewards(use_torch):
     class ReusedRewardEnv(StepEnv):

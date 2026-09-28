@@ -12,6 +12,7 @@ from .standardize.helpers import (
     any_true,
     dones_of,
     get_attr,
+    is_vectorized,
 )
 
 # helpers
@@ -21,6 +22,16 @@ def stack_steps(steps):
 
 def chunk_steps(actions, axis):
     return actions.unbind(dim = axis) if is_tensor(actions) else np.moveaxis(actions, axis, 0)
+
+def unbatch_step(action):
+    # chunks always carry a num_envs axis - drop it for plain single envs
+    if is_tensor(action):
+        return action.squeeze(0)
+
+    if isinstance(action, np.ndarray):
+        return np.squeeze(action, axis = 0) if action.ndim > 0 else action
+
+    return action
 
 # wrapper
 
@@ -53,6 +64,7 @@ class ActionChunkWrapper(EnvWrapper):
 
         action_space = get_attr(env, 'action_space')
         self.action_shape = tuple(get_attr(action_space, 'shape', ()) or ())
+        self.expects_batch = is_vectorized(env)
 
     @property
     def chunk_action_shape(self):
@@ -82,6 +94,9 @@ class ActionChunkWrapper(EnvWrapper):
         out = None
 
         for action in chunk_steps(actions, chunk_axis):
+            if not self.expects_batch:
+                action = unbatch_step(action)
+
             out = self.env.step(action)
             rewards.append(copy_leaf(out[1]))
 
