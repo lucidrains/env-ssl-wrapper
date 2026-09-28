@@ -11,8 +11,10 @@ from .standardize.helpers import (
     default,
     any_true,
     dones_of,
+    first_existing,
     get_attr,
     is_vectorized,
+    to_numpy,
 )
 
 # helpers
@@ -62,9 +64,13 @@ class ActionChunkWrapper(EnvWrapper):
         self.gamma = float(gamma)
         self.reward_mode = reward_mode
 
-        action_space = get_attr(env, 'action_space')
+        # vectorized gym envs expose a batched action space - the single env space defines the chunk layout
+
+        action_space = first_existing(env, 'single_action_space', 'action_space')
         self.action_shape = tuple(get_attr(action_space, 'shape', ()) or ())
+
         self.expects_batch = is_vectorized(env)
+        self.raw_env = not isinstance(env, EnvWrapper)
 
     @property
     def chunk_action_shape(self):
@@ -79,6 +85,11 @@ class ActionChunkWrapper(EnvWrapper):
 
         if not (is_tensor(actions) or isinstance(actions, np.ndarray)):
             actions = np.asarray(actions)
+
+        # raw simulators only understand numpy - wrapper chains from this package handle torch actions
+
+        if self.raw_env and is_tensor(actions):
+            actions = to_numpy(actions)
 
         chunk_axis = actions.ndim - 1 - len(self.action_shape)
 

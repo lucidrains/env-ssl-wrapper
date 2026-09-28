@@ -381,6 +381,92 @@ def test_action_chunk_plain_env_matches_per_step():
     assert abs(float(np.sum(reward)) - expected_reward) < 1e-6
     assert not bool(terminated) and not bool(truncated)
 
+@pytest.mark.parametrize('chunk_len', [1, 2, 6])
+def test_action_chunk_plain_single_env_torch_matches_numpy(chunk_len):
+    seed = 0
+
+    numpy_env = ActionChunkWrapper(gym.make('CartPole-v1'), chunk_len = chunk_len)
+    numpy_env.reset(seed = seed)
+    numpy_obs, numpy_reward, _, _, numpy_info = numpy_env.step(np.array([[0, 1, 1, 0, 0, 1]])[:, :chunk_len])
+
+    torch_env = ActionChunkWrapper(gym.make('CartPole-v1'), chunk_len = chunk_len)
+    torch_env.reset(seed = seed)
+    torch_obs, torch_reward, _, _, torch_info = torch_env.step(torch.tensor([[0, 1, 1, 0, 0, 1]])[:, :chunk_len])
+
+    assert np.allclose(torch_obs, numpy_obs)
+    assert abs(float(np.sum(torch_reward)) - float(np.sum(numpy_reward))) < 1e-6
+    assert np.allclose(torch_info['chunk_rewards'], numpy_info['chunk_rewards'])
+
+def test_action_chunk_plain_single_env_box_torch():
+    env = ActionChunkWrapper(gym.make('Pendulum-v1'), chunk_len = 2)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(torch.zeros(1, 2, 1))
+
+    assert obs.shape == (3,)
+    assert info['chunk_length'] == 2
+    assert info['chunk_rewards'].shape == (2,)
+
+@pytest.mark.parametrize('num_envs', [1, 3])
+@pytest.mark.parametrize('use_torch', [False, True])
+def test_action_chunk_raw_vector_env(num_envs, use_torch):
+    env = ActionChunkWrapper(gym.vector.SyncVectorEnv([lambda: gym.make('CartPole-v1') for _ in range(num_envs)]), chunk_len = 3)
+
+    try:
+        obs, _ = env.reset(seed = 0)
+        assert obs.shape == (num_envs, 4)
+        assert env.chunk_action_shape == (3,)
+
+        actions = torch.zeros(num_envs, 3, dtype = torch.long) if use_torch else np.zeros((num_envs, 3), dtype = int)
+        obs, reward, terminated, truncated, info = env.step(actions)
+
+        assert obs.shape == (num_envs, 4)
+        assert reward.shape == (num_envs,)
+        assert terminated.shape == (num_envs,)
+        assert truncated.shape == (num_envs,)
+        assert info['chunk_length'] == 3
+        assert info['chunk_rewards'].shape == (num_envs, 3)
+        assert np.allclose(reward, [3.] * num_envs)
+    finally:
+        env.close()
+
+def test_action_chunk_raw_vector_env_box():
+    env = ActionChunkWrapper(gym.vector.SyncVectorEnv([lambda: gym.make('Pendulum-v1') for _ in range(2)]), chunk_len = 2)
+
+    try:
+        env.reset(seed = 0)
+        assert env.chunk_action_shape == (2, 1)
+
+        obs, reward, terminated, truncated, info = env.step(np.zeros((2, 2, 1)))
+
+        assert obs.shape == (2, 3)
+        assert reward.shape == (2,)
+        assert info['chunk_length'] == 2
+        assert info['chunk_rewards'].shape == (2, 2)
+    finally:
+        env.close()
+
+def test_action_chunk_raw_vector_env_early_stop():
+    env = ActionChunkWrapper(gym.vector.SyncVectorEnv([lambda: gym.make('CartPole-v1') for _ in range(2)]), chunk_len = 10)
+
+    try:
+        env.reset(seed = 0)
+
+        seen_early_stop = False
+        for _ in range(20):
+            obs, reward, terminated, truncated, info = env.step(np.zeros((2, 10), dtype = int))
+            executed = info['chunk_length']
+
+            assert 1 <= executed <= 10
+            assert info['chunk_rewards'].shape == (2, executed)
+
+            if executed < 10:
+                seen_early_stop = True
+
+        assert seen_early_stop
+    finally:
+        env.close()
+
 @pytest.mark.parametrize('use_torch', [False, True])
 def test_action_chunk_snapshots_reused_rewards(use_torch):
     class ReusedRewardEnv(StepEnv):
