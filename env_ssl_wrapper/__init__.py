@@ -6,6 +6,7 @@ from .standardize import *
 
 from .memory_trace import MemoryTraceWrapper
 from .action_chunk import ActionChunkWrapper
+from .evaluate import evaluate_actor, EpisodeStats
 
 # Wire backwards-compatibility aliases in sys.modules and module globals
 # so imports like `from env_ssl_wrapper.done_tracker_wrapper import DoneTrackerWrapper`
@@ -40,6 +41,8 @@ __all__ = [
     *standardize.__all__,
     'MemoryTraceWrapper',
     'ActionChunkWrapper',
+    'evaluate_actor',
+    'EpisodeStats',
 ]
 
 def __getattr__(name):
