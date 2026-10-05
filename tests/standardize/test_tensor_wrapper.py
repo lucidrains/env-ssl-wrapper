@@ -117,3 +117,23 @@ def test_obs_not_aliased_cast_disabled():
 
     assert torch.equal(obs0, torch.zeros(2, 3, dtype = torch.int64))
     assert torch.equal(obs1, torch.ones(2, 3, dtype = torch.int64))
+
+# zero-copy — torch inputs already on the target device / dtype pass through as the same object,
+# and a CPU action tensor converts to numpy as a shared-memory view
+
+def test_numpy_to_torch_identity_for_torch_input():
+    from env_ssl_wrapper.tensor_wrapper import numpy_to_torch
+
+    t = torch.randn(2, 3)
+
+    assert numpy_to_torch(t, torch.device('cpu')) is t
+    assert numpy_to_torch(dict(obs = t), torch.device('cpu'))['obs'] is t
+    assert numpy_to_torch((t,), torch.device('cpu'))[0] is t
+
+def test_torch_to_numpy_zero_copy_on_cpu():
+    from env_ssl_wrapper.tensor_wrapper import torch_to_numpy
+
+    t = torch.randn(2, 3)
+    arr = torch_to_numpy(t)
+
+    assert np.shares_memory(arr, t.numpy())

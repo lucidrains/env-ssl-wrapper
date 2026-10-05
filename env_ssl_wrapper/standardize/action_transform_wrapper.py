@@ -129,8 +129,6 @@ class ActionTransformWrapper(EnvWrapper):
             if not is_float_dtype(t):
                 return t
 
-            t = copy_leaf(t)
-
             for ind, transform in enumerate(self.transforms):
                 indices = transform.get('indices', ind if len(self.transforms) > 1 else None)
 
@@ -141,6 +139,9 @@ class ActionTransformWrapper(EnvWrapper):
                 fn = partial(rescale, from_range = from_range, to_range = to_range)
 
                 if exists(indices):
+                    # copy only when writing in place, so the caller's action is never mutated
+
+                    t = copy_leaf(t)
                     t[..., indices] = fn(t[..., indices])
                 else:
                     t = fn(t)

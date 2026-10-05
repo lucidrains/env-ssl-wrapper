@@ -24,6 +24,7 @@ from env_ssl_wrapper.mocks import (
     LegacyGymMockEnv,
     ManiSkillMockEnv,
     MetaWorldMockEnv,
+    MjlabMockEnv,
     MujocoMockEnv,
     PufferTensorMockEnv,
     PufferVectorMockEnv,
@@ -142,6 +143,7 @@ TORCH_ACTION_CASES = [
     (DMControlRoboticsMockEnv(), torch.ones(2), 'dmc robotics'),
     (RobosuiteMockEnv(), torch.ones(4), 'robosuite'),
     (IsaacLabMockEnv(), torch.ones(4, 2), 'isaac lab'),
+    (MjlabMockEnv(), torch.ones(4, 2), 'mjlab'),
     (ManiSkillMockEnv(), torch.ones(1, 8), 'maniskill'),
     (BraxMockEnv(), torch.ones(4, 2), 'brax'),
     (MetaWorldMockEnv(), torch.ones(4), 'metaworld'),
@@ -245,6 +247,20 @@ def test_isaac_lab_interface():
     assert len(out) == 5
     assert set(out[0]) == {'policy', 'critic'} and is_tensor(out[2])
 
+def test_mjlab_interface():
+    env = MjlabMockEnv(seed = 0)
+    obs, info = env.reset()
+    assert set(obs) == {'policy', 'critic'} and all(is_tensor(v) for v in obs.values())
+    assert obs['policy'].shape == (4, 4)
+
+    out = env.step(torch.ones(4, 2))
+    assert len(out) == 5
+    assert all(is_tensor(x) for x in tree_flatten(out[0])[0])
+    assert all(is_tensor(x) for x in out[1:4])
+
+    with pytest.raises(TypeError):
+        env.step(np.ones((4, 2)))
+
 def test_maniskill_interface():
     env = ManiSkillMockEnv(num_envs = 2, seed = 0)
     assert env.single_action_space.shape == (8,)
@@ -323,6 +339,7 @@ DETERMINISTIC_CASES = [
     (HabitatMockEnv(), np.ones(2), 'habitat'),
     (TupleObsMockEnv(), np.ones((4, 2)), 'tuple'),
     (IsaacMockEnv(), torch.ones(4, 2), 'isaac'),
+    (MjlabMockEnv(), torch.ones(4, 2), 'mjlab'),
     (RobosuiteMockEnv(), np.ones(4), 'robosuite'),
 ]
 

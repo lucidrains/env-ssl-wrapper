@@ -4,7 +4,7 @@ from multiprocessing import get_context
 import numpy as np
 import torch
 from torch import is_tensor
-from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
+from torch.utils._pytree import tree_map
 
 from .helpers import (
     any_true,

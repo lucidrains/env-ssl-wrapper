@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from torch.utils._pytree import tree_map
 
-from .helpers import default, exists, first_existing, get_attr, to_numpy
+from .helpers import default, exists, get_attr, to_numpy
 
 # stand-in for environments that do not expose gymnasium spaces
 

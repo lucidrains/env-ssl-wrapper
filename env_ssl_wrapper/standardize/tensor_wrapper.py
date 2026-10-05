@@ -12,6 +12,7 @@ from .helpers import (
     FINAL_OBSERVATION_KEYS,
     FINAL_OBSERVATION_MASK_KEYS,
     exists,
+    get_adapter,
     get_attr,
     is_scalar,
     unpack_vector_observations,
@@ -96,6 +97,11 @@ class TensorWrapper(EnvWrapper):
         self.convert_in = convert_in
         self.convert_out = convert_out
         self.cast_obs_to_float = cast_obs_to_float
+
+        # torch-native sims (mjlab, isaac) take torch actions as-is — zero-copy passthrough
+
+        self.torch_native = get_adapter(env).torch_native
+
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
     def cast_info(self, info):
@@ -126,7 +132,9 @@ class TensorWrapper(EnvWrapper):
         return contract(self.cast(t), to_float = to_float)
 
     def step(self, action):
-        action = torch_to_numpy(action) if self.convert_in else action
+        if self.convert_in and not self.torch_native:
+            action = torch_to_numpy(action)
+
         obs, reward, terminated, truncated, info = self.env.step(action)
 
         if not self.convert_out:

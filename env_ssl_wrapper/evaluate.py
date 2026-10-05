@@ -128,9 +128,12 @@ def to_env_action(env, action):
     device = get_attr(env, 'device')
     action = action.to(device) if exists(device) else action
 
-    # raw simulators take unbatched numpy
+    # raw simulators take unbatched numpy — torch-native sims take torch as-is (zero-copy)
 
     if not isinstance(env, EnvWrapper):
+        if get_adapter(env).torch_native:
+            return action
+
         action = to_numpy(action)
 
         if action.ndim > 1 and action.shape[0] == 1:

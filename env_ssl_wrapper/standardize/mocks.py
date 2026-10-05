@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import numpy as np
@@ -390,6 +391,52 @@ class IsaacLabMockEnv(MockEnv):
             self.state[ind] = 0
 
         return self.obs(), torch.randn(self.num_envs), dones, torch.zeros(self.num_envs, dtype = torch.bool), {}
+
+# mjlab — manager-based RL on mujoco warp: always vectorized, torch-native
+# (step takes torch tensors only), autoresets within step, dict obs of torch tensors
+
+class MjlabMockEnv(MockEnv):
+    num_envs = 4
+    is_vector = True
+    is_vector_env = True
+
+    def __init__(self, num_envs = 4, auto_reset = True, seed = 0):
+        self.num_envs = num_envs
+        self.cfg = SimpleNamespace(auto_reset = auto_reset)
+        super().__init__(seed)
+
+    def reset(self, *, seed = None, env_ids = None, options = None):
+        if seed is not None:
+            self.seed(seed)
+        else:
+            self.reset_state()
+        return self.obs(), {}
+
+    def obs(self):
+        return dict(
+            policy = torch.randn(self.num_envs, self.obs_dim),
+            critic = torch.randn(self.num_envs, self.obs_dim * 2)
+        )
+
+    def step(self, action):
+        if not is_tensor(action):
+            raise TypeError(f'mjlab envs step on torch tensors, got {type(action).__name__}')
+
+        self.advance(action)
+        self.last_action = action
+
+        dones = torch.from_numpy(self.is_done())
+
+        if self.cfg.auto_reset:
+            for ind in np.where(dones.numpy())[0]:
+                self.t[ind] = 0
+                self.state[ind] = 0
+
+        return self.obs(), torch.ones(self.num_envs), dones, torch.zeros(self.num_envs, dtype = torch.bool), {}
+
+# live in the real module path so the adapter recognizes the mock
+
+MjlabMockEnv.__module__ = 'mjlab.envs.manager_based_rl_env'
 
 # maniskill — gymnasium-compliant, but always batched even at num_envs = 1:
 # obs / reward / dones are torch tensors with a leading batch dim, and the

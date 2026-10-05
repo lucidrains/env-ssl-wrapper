@@ -6,18 +6,20 @@ from .helpers import (
     exists,
     first_existing,
     get_attr,
-    is_time_step,
     normalize_reset_out,
     normalize_step_out,
     safe_close,
     truthy_attr,
-    zero_like,
 )
 from .spaces import space_from_action_spec
 
 # base adapter
 
 class BaseEnvAdapter:
+    # torch-native sims consume torch actions directly on device — no numpy roundtrip
+
+    torch_native = False
+
     @classmethod
     def matches(cls, env) -> bool:
         return False
@@ -149,6 +151,10 @@ class WrapperAdapter(BaseEnvAdapter):
         return truthy_attr(val) if exists(val) else self.inner_adapter.autoresets
 
     @property
+    def torch_native(self) -> bool:
+        return self.inner_adapter.torch_native
+
+    @property
     def action_space(self):
         return default(
             first_existing(self.env, 'single_action_space', 'action_space'),
@@ -194,13 +200,8 @@ class DMControlAdapter(BaseEnvAdapter):
     def action_space(self):
         return default(super().action_space, space_from_action_spec(self.env))
 
-    @property
-    def is_vectorized(self) -> bool:
-        return False
-
-    @property
-    def autoresets(self) -> bool:
-        return False
+    is_vectorized = False
+    autoresets = False
 
 # pybullet adapter
 
@@ -227,31 +228,38 @@ class PyBulletAdapter(BaseEnvAdapter):
             return
         super().seed(seed)
 
-    @property
-    def is_vectorized(self) -> bool:
-        return False
+    is_vectorized = False
+    autoresets = False
+
+# mjlab adapter (manager-based rl envs on mujoco warp)
+
+class MjlabAdapter(BaseEnvAdapter):
+    torch_native = True
+    is_vectorized = True
+
+    @classmethod
+    def matches(cls, env):
+        mod = getattr(type(env), '__module__', '')
+        name = type(env).__name__
+        return 'mjlab' in mod.lower() or name == 'ManagerBasedRlEnv'
 
     @property
     def autoresets(self) -> bool:
-        return False
+        return truthy_attr(get_attr(get_attr(self.env, 'cfg'), 'auto_reset', True))
 
 # isaac sim adapter (isaac gym / isaac lab / omniverse)
 
 class IsaacAdapter(BaseEnvAdapter):
+    torch_native = True
+    is_vectorized = True
+    autoresets = True
+
     @classmethod
     def matches(cls, env):
         mod = getattr(type(env), '__module__', '')
         name = type(env).__name__
         isaac_kw = ('isaac', 'omni.isaac', 'isaacgym', 'isaaclab')
         return any(k in mod.lower() for k in isaac_kw) or 'Isaac' in name or exists(get_attr(env, 'sim_device')) or exists(get_attr(env, 'physics_sim_view'))
-
-    @property
-    def is_vectorized(self) -> bool:
-        return True
-
-    @property
-    def autoresets(self) -> bool:
-        return True
 
 # mujoco warp / warp / brax / mjx adapter
 
@@ -276,15 +284,13 @@ class MujocoWarpAdapter(BaseEnvAdapter):
 # pufferlib adapter
 
 class PufferLibAdapter(BaseEnvAdapter):
+    is_vectorized = True
+
     @classmethod
     def matches(cls, env):
         mod = getattr(type(env), '__module__', '')
         name = type(env).__name__
         return 'Puffer' in name or 'pufferlib' in mod or exists(get_attr(env, 'puffer_env'))
-
-    @property
-    def is_vectorized(self) -> bool:
-        return True
 
     @property
     def autoresets(self) -> bool:
@@ -350,6 +356,18 @@ class GymnasiumAdapter(BaseEnvAdapter):
             pass
         return self.num_envs > 1
 
+    def unwrapped_adapter(self):
+        # foreign gym wrappers (TimeLimit, RecordEpisodeStatistics, ...) inherit
+        # the unwrapped sim's adapter traits
+
+        inner = get_attr(self.env, 'unwrapped')
+        return get_adapter(inner) if exists(inner) and inner is not self.env else None
+
+    @property
+    def torch_native(self) -> bool:
+        inner = self.unwrapped_adapter()
+        return exists(inner) and inner.torch_native
+
     @property
     def autoresets(self) -> bool:
         mode = first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode')
@@ -359,9 +377,13 @@ class GymnasiumAdapter(BaseEnvAdapter):
 
         try:
             from gymnasium.vector import VectorEnv
-            return isinstance(self.env, VectorEnv)
+            if isinstance(self.env, VectorEnv):
+                return True
         except ImportError:
-            return False
+            pass
+
+        inner = self.unwrapped_adapter()
+        return exists(inner) and inner.autoresets
 
     def seed(self, seed: int):
         try:
@@ -400,6 +422,7 @@ class DefaultAdapter(BaseEnvAdapter):
 
 ADAPTER_REGISTRY: list[type[BaseEnvAdapter]] = [
     WrapperAdapter,
+    MjlabAdapter,
     MujocoWarpAdapter,
     IsaacAdapter,
     PyBulletAdapter,

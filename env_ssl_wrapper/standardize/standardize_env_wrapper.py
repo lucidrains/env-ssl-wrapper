@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from .helpers import EnvWrapper, exists, default, is_vectorized
+from .helpers import EnvWrapper, exists, is_vectorized
 from .utils import compose_env
 
 class StandardizeEnvWrapper(EnvWrapper):

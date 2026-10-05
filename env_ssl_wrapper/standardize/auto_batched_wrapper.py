@@ -19,7 +19,6 @@ from .helpers import (
     is_tensor,
     is_vectorized,
 )
-from .spaces import space_from_action_spec
 
 # helper functions
 

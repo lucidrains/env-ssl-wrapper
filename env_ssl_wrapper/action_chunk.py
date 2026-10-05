@@ -12,6 +12,7 @@ from .standardize.helpers import (
     any_true,
     dones_of,
     first_existing,
+    get_adapter,
     get_attr,
     is_vectorized,
     to_numpy,
@@ -70,7 +71,7 @@ class ActionChunkWrapper(EnvWrapper):
         self.action_shape = tuple(get_attr(action_space, 'shape', ()) or ())
 
         self.expects_batch = is_vectorized(env)
-        self.raw_env = not isinstance(env, EnvWrapper)
+        self.convert_in = not isinstance(env, EnvWrapper) and not get_adapter(env).torch_native
 
     @property
     def chunk_action_shape(self):
@@ -86,9 +87,9 @@ class ActionChunkWrapper(EnvWrapper):
         if not (is_tensor(actions) or isinstance(actions, np.ndarray)):
             actions = np.asarray(actions)
 
-        # raw simulators only understand numpy - wrapper chains from this package handle torch actions
+        # raw simulators only understand numpy — wrapper chains and torch-native sims take torch
 
-        if self.raw_env and is_tensor(actions):
+        if is_tensor(actions) and self.convert_in:
             actions = to_numpy(actions)
 
         chunk_axis = actions.ndim - 1 - len(self.action_shape)

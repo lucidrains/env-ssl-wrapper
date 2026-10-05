@@ -11,6 +11,7 @@ from env_ssl_wrapper.adapters import (
     GymnasiumAdapter,
     IsaacAdapter,
     LegacyGymAdapter,
+    MjlabAdapter,
     MujocoWarpAdapter,
     PufferLibAdapter,
     PyBulletAdapter,
@@ -37,6 +38,7 @@ from env_ssl_wrapper.mocks import (
     LegacyGymMockEnv,
     ManiSkillMockEnv,
     MetaWorldMockEnv,
+    MjlabMockEnv,
     MjxMockEnv,
     PufferTensorMockEnv,
     PufferVectorMockEnv,
@@ -53,6 +55,7 @@ def test_adapter_matching():
     assert isinstance(get_adapter(PyBulletMockEnv()), PyBulletAdapter)
     assert isinstance(get_adapter(IsaacMockEnv()), IsaacAdapter)
     assert isinstance(get_adapter(IsaacLabMockEnv()), IsaacAdapter)
+    assert isinstance(get_adapter(MjlabMockEnv()), MjlabAdapter)
     assert isinstance(get_adapter(DMControlMockEnv()), DMControlAdapter)
     assert isinstance(get_adapter(DMControlRoboticsMockEnv()), DMControlAdapter)
     assert isinstance(get_adapter(PufferVectorMockEnv()), PufferLibAdapter)
