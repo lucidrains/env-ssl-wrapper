@@ -18,17 +18,14 @@ from .helpers import (
 )
 
 def back_to_like(t, numpy_arr):
-    if is_tensor(t):
-        return torch.from_numpy(numpy_arr).to(t.device)
+    # scalar dones stay scalar
 
-    if isinstance(t, np.ndarray):
-        return numpy_arr
+    if is_tensor(t) or isinstance(t, np.ndarray):
+        res = torch.from_numpy(numpy_arr).to(t.device) if is_tensor(t) else numpy_arr
+        return res.squeeze() if t.ndim == 0 else res
 
     # python scalars (single-env dones) collapse to a scalar; foreign
     # array-likes (jax) keep the numpy array so the batch dim survives
-
-    if numpy_arr.ndim == 0:
-        return bool(numpy_arr)
 
     if numpy_arr.size == 1:
         return bool(numpy_arr.reshape(-1)[0])

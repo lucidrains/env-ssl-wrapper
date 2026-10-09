@@ -84,7 +84,7 @@ class ActionTransformWrapper(EnvWrapper):
         # rescale canonical range (default (0, 1), beta-friendly) to per-env
         # bounds, leaving unbounded dimensions untouched
 
-        if self.bounds is None:
+        if not exists(self.bounds):
             return t
 
         low, high = self.bounds

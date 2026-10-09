@@ -7,6 +7,8 @@ import numpy as np
 import torch
 from torch import is_tensor
 
+from .helpers import default, exists
+
 # mock sims — stand-ins for real-world environments with varying MDP interfaces
 # all share the underlying dynamics; each emulates the quirks of a real sim
 
@@ -59,6 +61,10 @@ class DiscreteSpace:
 
     def sample(self):
         return np.random.randint(self.n)
+
+class DictSpace:
+    def __init__(self, **spaces):
+        self.spaces = spaces
 
 # sim-specific render surfaces — emulating how each sim actually produces images
 
@@ -125,16 +131,20 @@ class MockEnv:
         return False
 
     def seed(self, seed = 0):
+        seed = default(seed, 0)
         self.rng = np.random.default_rng(seed)
         torch.manual_seed(seed)
         self.reset_state()
 
     def reset(self, seed = None, **kwargs):
-        if seed is not None:
+        self.restart(seed)
+        return self.obs(), {}
+
+    def restart(self, seed = None):
+        if exists(seed):
             self.seed(seed)
         else:
             self.reset_state()
-        return self.obs(), {}
 
     def reset_state(self):
         self.t = np.zeros(self.num_envs, dtype = int) if self.is_vector else 0
@@ -406,10 +416,7 @@ class MjlabMockEnv(MockEnv):
         super().__init__(seed)
 
     def reset(self, *, seed = None, env_ids = None, options = None):
-        if seed is not None:
-            self.seed(seed)
-        else:
-            self.reset_state()
+        self.restart(seed)
         return self.obs(), {}
 
     def obs(self):
@@ -487,10 +494,7 @@ class ManiSkillMockEnv(MockEnv):
         return dict(state = state) if self.obs_mode == 'state_dict' else state
 
     def reset(self, seed = None, options = None):
-        if seed is not None:
-            self.seed(seed)
-        else:
-            self.reset_state()
+        self.restart(seed)
         return self.obs(), dict(reconfigure = False)
 
     def step(self, action):
@@ -514,6 +518,9 @@ class JaxArray:
 
     def __array__(self, dtype = None):
         return np.asarray(self._arr, dtype = dtype)
+
+    def __getitem__(self, item):
+        return JaxArray(self._arr[item])
 
     @property
     def dtype(self):
@@ -550,19 +557,15 @@ class BraxMockEnv(MockEnv):
         self.advance(action)
         return JaxArray(self.obs()), JaxArray(np.ones(self.num_envs)), JaxArray(self.is_done()), {}
 
-# mujoco-mjx — gymnasium-style 5-tuple step, (obs, info) reset, single env, and
-# every stream (obs / reward / dones) is a jax array: the dialect of envs built
-# on the mjx jax physics backend
+# mujoco-mjx — gymnasium-style 5-tuple step, (obs, info) reset, single env,
+# every stream (obs / reward / dones) a jax array
 
 class MjxMockEnv(MockEnv):
     obs_dim = 8
     action_dim = 6
 
     def reset(self, seed = None, **kwargs):
-        if seed is not None:
-            self.seed(seed)
-        else:
-            self.reset_state()
+        self.restart(seed)
         return JaxArray(self.obs()), {}
 
     def step(self, action):
@@ -652,3 +655,232 @@ class TupleObsMockEnv(MockEnv):
     def step(self, action):
         self.advance(action)
         return self.obs(), np.ones(self.num_envs), self.is_done(), np.zeros(self.num_envs, dtype = bool), {}
+
+# rlbench — language-conditioned manipulation: reset -> (descriptions, obs),
+# step -> (obs, reward, terminate); obs unpacks via get_low_dim_data()
+
+class RLBenchObservation:
+    def __init__(self, joint_pos, gripper, wrist_rgb):
+        self.joint_positions = joint_pos
+        self.gripper_open = gripper
+        self.wrist_rgb = wrist_rgb
+
+    def get_low_dim_data(self):
+        return np.concatenate([self.joint_positions, np.array([self.gripper_open])])
+
+class RLBenchMockEnv(MockEnv):
+    obs_dim = 8
+    action_dim = 8
+    max_steps = 40
+
+    def __init__(self, task_name = 'open_drawer', seed = 0):
+        self.task_name = task_name
+        self.descriptions = [f'{task_name.replace("_", " ")} task']
+        super().__init__(seed)
+
+    def rlbench_obs(self):
+        return RLBenchObservation(
+            joint_pos = self.obs()[:7],
+            gripper = 1.0,
+            wrist_rgb = np.zeros((64, 64, 3), dtype = np.uint8)
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.descriptions, self.rlbench_obs()
+
+    def step(self, action):
+        self.advance(action)
+        return self.rlbench_obs(), 1.0, self.is_done()
+
+# omnigibson (behavior-1k) — obs-dict-only reset, 5-tuple step, sim render
+
+class OmniGibsonMockEnv(MockEnv):
+    obs_dim = 14
+    action_dim = 6
+    max_steps = 100
+
+    def __init__(self, seed = 0):
+        super().__init__(seed)
+        self.sim = FakeSim()
+
+    def obs_dict(self):
+        return dict(
+            robot0_proprio = self.obs(),
+            rgb = np.zeros((64, 64, 3), dtype = np.uint8)
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.obs_dict()
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 1.0, self.is_done(), False, {}
+
+# robomimic — structured obs dict, obs-only reset, 4-tuple step
+
+class RoboMimicMockEnv(MockEnv):
+    obs_dim = 10
+    action_dim = 7
+    max_steps = 50
+
+    def obs_dict(self):
+        return dict(
+            robot0_eef_pos = self.obs()[:3],
+            robot0_eef_quat = np.array([0., 0., 0., 1.]),
+            object = self.obs()[3:]
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.obs_dict()
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 1.0, self.is_done(), {}
+
+# myosuite — musculoskeletal mujoco robotics: high-dim muscle states,
+# physics render, 5-tuple step
+
+class MyoSuiteMockEnv(MockEnv):
+    obs_dim = 36
+    action_dim = 12
+    max_steps = 80
+
+    def __init__(self, seed = 0):
+        super().__init__(seed)
+        self.physics = FakePhysics()
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs(), 1.0, self.is_done(), False, {}
+
+# gymnasium-robotics (farama goal envs: fetch, shadow hand, franka kitchen) —
+# dict obs (observation / achieved_goal / desired_goal), exposes compute_reward
+
+class GymnasiumRoboticsMockEnv(MockEnv):
+    obs_dim = 10
+    goal_dim = 3
+    action_dim = 4
+    max_steps = 50
+
+    @property
+    def observation_space(self):
+        return DictSpace(
+            observation = Space((self.obs_dim,)),
+            achieved_goal = Space((self.goal_dim,)),
+            desired_goal = Space((self.goal_dim,)),
+        )
+
+    def goal_dict(self):
+        return dict(
+            observation = self.obs(),
+            achieved_goal = self.obs()[:self.goal_dim],
+            desired_goal = np.zeros(self.goal_dim)
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.goal_dict(), {}
+
+    def compute_reward(self, achieved_goal, desired_goal, info):
+        return -np.linalg.norm(achieved_goal - desired_goal, axis = -1)
+
+    def step(self, action):
+        self.advance(action)
+        obs = self.goal_dict()
+        reward = float(self.compute_reward(obs['achieved_goal'], obs['desired_goal'], {}))
+        return obs, reward, self.is_done(), False, {}
+
+# lerobot (hugging face aloha / pusht) — bimanual multi-camera robotics:
+# dict obs with visual pixels + robot state, 5-tuple step
+
+class LeRobotMockEnv(MockEnv):
+    obs_dim = 14
+    action_dim = 14
+    max_steps = 60
+
+    def obs_dict(self):
+        return dict(
+            agent_pos = self.obs(),
+            pixels = dict(
+                top = np.zeros((64, 64, 3), dtype = np.uint8),
+                wrist = np.zeros((64, 64, 3), dtype = np.uint8)
+            )
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.obs_dict(), {}
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 1.0, self.is_done(), False, {}
+
+# calvin (language-conditioned multi-task 3d manipulation) — string instruction
+# reset with structured vision + proprio dict, 5-tuple step
+
+class CalvinMockEnv(MockEnv):
+    obs_dim = 15
+    action_dim = 7
+    max_steps = 40
+
+    def __init__(self, task_instruction = 'open drawer and push red block', seed = 0):
+        super().__init__(seed = seed)
+        self.task_instruction = task_instruction
+
+    def obs_dict(self):
+        return dict(
+            robot_obs = self.obs(),
+            rgb_obs = dict(
+                rgb_static = np.zeros((64, 64, 3), dtype = np.uint8),
+                rgb_gripper = np.zeros((64, 64, 3), dtype = np.uint8)
+            )
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.task_instruction, self.obs_dict()
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 1.0, self.is_done(), False, {}
+
+# pusht (diffusion policy planar pushing benchmark) — 2-dim eef actions in (0, 512),
+# dict observation with agent_pos and block_pose
+
+class PushTMockEnv(MockEnv):
+    obs_dim = 2
+    action_dim = 2
+    max_steps = 50
+
+    @property
+    def action_space(self):
+        return Space((self.action_dim,), 0., 512.)
+
+    def obs_dict(self):
+        return dict(
+            agent_pos = self.obs(),
+            block_pose = np.zeros(3)
+        )
+
+    def reset(self, seed = None, **kwargs):
+        self.restart(seed)
+        return self.obs_dict(), {}
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs_dict(), 1.0, self.is_done(), False, {}
+
+# gym-pybullet-drones / aerial robotics — 4-dim motor rpm action space [-1, 1],
+# 12-dim kinematics observation (pos, rpy, vel, ang_vel)
+
+class DroneAviaryMockEnv(MockEnv):
+    obs_dim = 12
+    action_dim = 4
+    max_steps = 60
+
+    def step(self, action):
+        self.advance(action)
+        return self.obs(), 1.0, self.is_done(), False, {}

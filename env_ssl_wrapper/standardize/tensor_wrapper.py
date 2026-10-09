@@ -13,7 +13,7 @@ from .helpers import (
     FINAL_OBSERVATION_MASK_KEYS,
     exists,
     get_adapter,
-    get_attr,
+    is_foreign_array,
     is_scalar,
     unpack_vector_observations,
 )
@@ -26,7 +26,7 @@ def to_torch_leaf(t, device, cast_obs_to_float = True):
             t = from_numpy(t.copy())
         elif is_scalar(t):
             t = tensor(t)
-        elif exists(get_attr(t, '__array__')):
+        elif is_foreign_array(t):
             t = from_numpy(np.asarray(t))
         else:
             return t
@@ -98,7 +98,7 @@ class TensorWrapper(EnvWrapper):
 
         # deprecated alias, kept for backwards compatibility
 
-        if cast_float64_to_float32 is not None:
+        if exists(cast_float64_to_float32):
             cast_obs_to_float = cast_float64_to_float32
 
         self.device = torch_device(device)
@@ -144,8 +144,12 @@ class TensorWrapper(EnvWrapper):
         return tree_map(convert, t)
 
     def step(self, action):
-        if self.convert_in and not self.torch_native:
-            action = torch_to_numpy(action)
+        if self.convert_in:
+            if not self.torch_native:
+                action = torch_to_numpy(action)
+            elif not is_tensor(action):
+                # torch-native sims take torch on device — lift numpy / foreign actions
+                action = numpy_to_torch(action, device = self.device, cast_obs_to_float = False)
 
         obs, reward, terminated, truncated, info = self.env.step(action)
 

@@ -65,17 +65,18 @@ def get_action_space(env):
     return get_adapter(env).action_space, False
 
 def action_shape_tree(space):
-    # canonical shapes parallel to action structure
+    # canonical shapes parallel to action structure — raw dict / list / tuple
+    # action spaces are handled as well as gymnasium's composite spaces
 
     if not exists(space):
         return None
 
-    subspaces = get_attr(space, 'spaces')
+    subspaces = space if isinstance(space, (dict, list, tuple)) else get_attr(space, 'spaces')
+
+    if isinstance(subspaces, dict):
+        return {key: action_shape_tree(subspace) for key, subspace in subspaces.items()}
 
     if exists(subspaces):
-        if isinstance(subspaces, dict):
-            return {key: action_shape_tree(subspace) for key, subspace in subspaces.items()}
-
         return [action_shape_tree(subspace) for subspace in subspaces]
 
     return get_attr(space, 'shape')

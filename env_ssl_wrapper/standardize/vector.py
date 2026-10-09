@@ -16,7 +16,7 @@ from .helpers import (
     truthy_attr,
     _zero_leaf,
 )
-from .spaces import action_dim_of
+from .spaces import action_dim_of, obs_dim_of
 from .standardize_wrapper import StandardizeWrapper
 
 # leaf helpers
@@ -216,6 +216,7 @@ class MultiprocessingVecEnv:
         self.action_space = self._get_attr('action_space')
         self.observation_space = self._get_attr('observation_space')
         self.action_dim = action_dim_of(self)
+        self.obs_dim = obs_dim_of(self)
 
         self.seed(seed)
 

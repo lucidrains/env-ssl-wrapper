@@ -31,7 +31,7 @@ def render_frame(env, image_size = (64, 64), camera = None):
     img = env_render(env, height, width, camera)
 
     if not exists(img):
-        if env_render_mode(env) is None:
+        if not exists(env_render_mode(env)):
             raise ValueError(
                 'env must be created with render_mode = "rgb_array", '
                 'e.g. gym.make(id, render_mode = "rgb_array")'

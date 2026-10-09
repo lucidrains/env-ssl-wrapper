@@ -13,6 +13,31 @@ from .helpers import (
 )
 from .spaces import space_from_action_spec
 
+# helpers
+
+def render_with_dims(render, height, width, camera = None):
+    # modern render(height, width, camera) vs legacy bare render()
+
+    try:
+        return render(height = height, width = width, camera = camera)
+    except TypeError:
+        return render()
+
+def render_sim(sim, height, width, camera = None):
+    # sims vary — robosuite-style (camera_name) vs bare no-kwargs render
+
+    render = get_attr(sim, 'render')
+
+    if not callable(render):
+        return None
+
+    kwargs = dict(camera_name = camera) if exists(camera) else {}
+
+    try:
+        return render(height = height, width = width, **kwargs)
+    except TypeError:
+        return None
+
 # base adapter
 
 class BaseEnvAdapter:
@@ -58,13 +83,14 @@ class BaseEnvAdapter:
             _, _, rgba, _, _ = client.getCameraImage(width, height, renderer = renderer)
             return rgba[..., :3]
 
-        sim = get_attr(self.env, 'sim')
-        if exists(sim) and callable(get_attr(sim, 'render')):
-            kwargs = dict(camera_name = camera) if exists(camera) else {}
-            return sim.render(height = height, width = width, **kwargs)
+        frame = render_sim(get_attr(self.env, 'sim'), height, width, camera)
+        if exists(frame):
+            return frame
 
-        if callable(get_attr(self.env, 'render')):
-            return self.env.render()
+        render = get_attr(self.env, 'render')
+
+        if callable(render):
+            return render_with_dims(render, height, width, camera)
 
         return None
 
@@ -127,8 +153,11 @@ class WrapperAdapter(BaseEnvAdapter):
         self.inner_adapter.seed(seed)
 
     def render(self, height: int, width: int, camera = None):
-        if callable(get_attr(self.env, 'render')):
-            return self.env.render()
+        render = get_attr(self.env, 'render')
+
+        if callable(render):
+            return render_with_dims(render, height, width, camera)
+
         return self.inner_adapter.render(height, width, camera)
 
     def close(self):
@@ -296,25 +325,37 @@ class PufferLibAdapter(BaseEnvAdapter):
     def autoresets(self) -> bool:
         return truthy_attr(first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode'))
 
-# robotics adapter (robosuite, maniskill, metaworld, trifinger, habitat)
+# robotics adapter (robosuite, maniskill, metaworld, trifinger, habitat, rlbench,
+# omnigibson, robomimic, myosuite, gymnasium-robotics, lerobot, ...)
+# sits before dm_control — several robotics sims expose `physics` but are not dm_control
+
+ROBOTICS_KEYWORDS = (
+    'robosuite', 'mani_skill', 'maniskill', 'metaworld', 'trifinger', 'habitat',
+    'omnigibson', 'igibson', 'robomimic', 'myosuite', 'gymnasiumrobotics',
+    'gymnasium_robotics', 'gym_robotics', 'goalenv', 'lerobot',
+    'gym_aloha', 'gym_pusht', 'aloha', 'pusht', 'sapien', 'rlbench', 'pyrep',
+    'calvin', 'language_table', 'drone', 'aviary', 'softgym', 'plasticinelab'
+)
 
 class RoboticsAdapter(BaseEnvAdapter):
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
-        robotics_names = ('Robosuite', 'ManiSkill', 'MetaWorld', 'Trifinger', 'Habitat')
-        robotics_mods = ('robosuite', 'mani_skill', 'maniskill', 'metaworld', 'habitat')
+        mod = getattr(type(env), '__module__', '').lower()
+        name = type(env).__name__.lower()
         has_sim_render = exists(get_attr(env, 'sim')) and callable(get_attr(get_attr(env, 'sim'), 'render'))
-        return any(r in name for r in robotics_names) or any(r in mod.lower() for r in robotics_mods) or has_sim_render
+        return any(k in name or k in mod for k in ROBOTICS_KEYWORDS) or has_sim_render
 
     def render(self, height: int, width: int, camera = None):
-        sim = get_attr(self.env, 'sim')
-        if exists(sim) and callable(get_attr(sim, 'render')):
-            kwargs = dict(camera_name = camera) if exists(camera) else {}
-            return sim.render(height = height, width = width, **kwargs)
-        if callable(get_attr(self.env, 'render')):
-            return self.env.render()
+        frame = render_sim(get_attr(self.env, 'sim'), height, width, camera)
+
+        if exists(frame):
+            return frame
+
+        render = get_attr(self.env, 'render')
+
+        if callable(render):
+            return render_with_dims(render, height, width, camera)
+
         return super().render(height, width, camera)
 
     @property
@@ -426,9 +467,9 @@ ADAPTER_REGISTRY: list[type[BaseEnvAdapter]] = [
     MujocoWarpAdapter,
     IsaacAdapter,
     PyBulletAdapter,
+    RoboticsAdapter,
     DMControlAdapter,
     PufferLibAdapter,
-    RoboticsAdapter,
     GymnasiumAdapter,
     LegacyGymAdapter,
     DefaultAdapter,

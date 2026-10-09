@@ -36,7 +36,7 @@ def zero_mask(x, mask, fill_scalar = None):
     arr = np.asarray(x)
 
     if arr.ndim == 0:
-        if fill_scalar is not None and bool(np.asarray(mask).any()):
+        if exists(fill_scalar) and bool(np.asarray(mask).any()):
             return fill_scalar
         return x
 
@@ -51,6 +51,7 @@ def back_to_mask_type(dones, newly):
 
 def merge_final(current, value, mask):
     if is_tensor(current):
+        value = torch.as_tensor(value, device = current.device, dtype = current.dtype)
         return torch.where(broadcast_mask(mask, current), value, current)
 
     curr = np.asarray(current)
@@ -59,7 +60,7 @@ def merge_final(current, value, mask):
         return current
 
     out = curr.copy()
-    out[mask] = np.asarray(value)[mask]
+    out[mask] = to_numpy(value)[mask]
     return out
 
 # class
@@ -90,7 +91,7 @@ class EpisodePaddingWrapper(EnvWrapper):
             dones = dones_of(terminated, truncated)
             mask = to_numpy(dones).astype(bool)
 
-            if self._is_done is None or len(self._is_done) != len(mask):
+            if not exists(self._is_done) or len(self._is_done) != len(mask):
                 self._is_done = np.zeros(len(mask), dtype = bool)
 
             # autoreset envs revive every done slot, so each done is a new
@@ -106,7 +107,7 @@ class EpisodePaddingWrapper(EnvWrapper):
                     final_val = first_existing(info, 'final_observation', 'final_obs')
                     value = final_val if exists(final_val) else self._last_obs
 
-                    if self._final_obs is None:
+                    if not exists(self._final_obs):
                         self._final_obs = tree_map(copy_leaf, value)
                     else:
                         self._final_obs = tree_map(partial(merge_final, mask = newly), self._final_obs, value)

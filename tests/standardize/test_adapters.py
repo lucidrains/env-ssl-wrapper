@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
 
 from env_ssl_wrapper.adapters import (
     BaseEnvAdapter,
     DMControlAdapter,
-    DefaultAdapter,
     GymnasiumAdapter,
     IsaacAdapter,
     LegacyGymAdapter,
@@ -23,7 +21,6 @@ from env_ssl_wrapper.adapters import (
 from env_ssl_wrapper.helpers import (
     env_autoresets,
     env_num_envs,
-    env_render,
     is_vectorized,
 )
 from env_ssl_wrapper.mocks import (
@@ -32,17 +29,26 @@ from env_ssl_wrapper.mocks import (
     DMControlMockEnv,
     DMControlRoboticsMockEnv,
     GymnasiumMockEnv,
+    GymnasiumRoboticsMockEnv,
     HabitatMockEnv,
     IsaacLabMockEnv,
     IsaacMockEnv,
+    LeRobotMockEnv,
     LegacyGymMockEnv,
     ManiSkillMockEnv,
     MetaWorldMockEnv,
     MjlabMockEnv,
     MjxMockEnv,
+    MyoSuiteMockEnv,
+    OmniGibsonMockEnv,
     PufferTensorMockEnv,
     PufferVectorMockEnv,
     PyBulletMockEnv,
+    CalvinMockEnv,
+    DroneAviaryMockEnv,
+    PushTMockEnv,
+    RLBenchMockEnv,
+    RoboMimicMockEnv,
     RobosuiteMockEnv,
     TrifingerMockEnv,
 )
@@ -67,6 +73,15 @@ def test_adapter_matching():
     assert isinstance(get_adapter(MetaWorldMockEnv()), RoboticsAdapter)
     assert isinstance(get_adapter(TrifingerMockEnv()), RoboticsAdapter)
     assert isinstance(get_adapter(HabitatMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(RLBenchMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(OmniGibsonMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(RoboMimicMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(MyoSuiteMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(GymnasiumRoboticsMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(LeRobotMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(CalvinMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(PushTMockEnv()), RoboticsAdapter)
+    assert isinstance(get_adapter(DroneAviaryMockEnv()), RoboticsAdapter)
     assert isinstance(get_adapter(GymnasiumMockEnv()), GymnasiumAdapter)
     assert isinstance(get_adapter(AutoresetVectorMockEnv()), GymnasiumAdapter)
     assert isinstance(get_adapter(LegacyGymMockEnv()), LegacyGymAdapter)

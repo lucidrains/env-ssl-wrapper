@@ -27,7 +27,16 @@ from env_ssl_wrapper.mocks import (
     MetaWorldMockEnv,
     TrifingerMockEnv,
     HabitatMockEnv,
-    TupleObsMockEnv
+    TupleObsMockEnv,
+    RLBenchMockEnv,
+    OmniGibsonMockEnv,
+    RoboMimicMockEnv,
+    MyoSuiteMockEnv,
+    GymnasiumRoboticsMockEnv,
+    LeRobotMockEnv,
+    CalvinMockEnv,
+    PushTMockEnv,
+    DroneAviaryMockEnv
 )
 
 from env_ssl_wrapper.done_tracker_wrapper import get_batch_size
@@ -55,7 +64,16 @@ MOCKS = [
     MetaWorldMockEnv(),
     TrifingerMockEnv(),
     HabitatMockEnv(),
-    TupleObsMockEnv()
+    TupleObsMockEnv(),
+    RLBenchMockEnv(),
+    OmniGibsonMockEnv(),
+    RoboMimicMockEnv(),
+    MyoSuiteMockEnv(),
+    GymnasiumRoboticsMockEnv(),
+    LeRobotMockEnv(),
+    CalvinMockEnv(),
+    PushTMockEnv(),
+    DroneAviaryMockEnv()
 ]
 
 def sample_actions(batch_size, action_space):
@@ -172,8 +190,6 @@ def test_torch_actions_received_directly(env):
 
 @pytest.mark.parametrize('env', MOCKS, ids = lambda env: type(env).__name__)
 def test_mock_consumes_actions_in_dynamics(env):
-    num_envs = env_num_envs(env)
-
     env = compose_env(
         env,
         'auto_batch',

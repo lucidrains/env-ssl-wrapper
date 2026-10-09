@@ -6,29 +6,39 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten
 
+from env_ssl_wrapper.helpers import normalize_reset_out
 from env_ssl_wrapper.mocks import (
     AutoresetVectorMockEnv,
     BraxMockEnv,
     DMControlMockEnv,
     DMControlRoboticsMockEnv,
     DiscreteSpace,
+    CalvinMockEnv,
+    DroneAviaryMockEnv,
     FakePhysics,
     FakePyBullet,
     FakeSim,
     GymnasiumDiscreteMockEnv,
     GymnasiumMockEnv,
+    GymnasiumRoboticsMockEnv,
     HabitatMockEnv,
     IsaacLabMockEnv,
     IsaacMockEnv,
     JaxArray,
+    LeRobotMockEnv,
+    PushTMockEnv,
     LegacyGymMockEnv,
     ManiSkillMockEnv,
     MetaWorldMockEnv,
     MjlabMockEnv,
     MujocoMockEnv,
+    MyoSuiteMockEnv,
+    OmniGibsonMockEnv,
     PufferTensorMockEnv,
     PufferVectorMockEnv,
     PyBulletMockEnv,
+    RLBenchMockEnv,
+    RoboMimicMockEnv,
     RobosuiteMockEnv,
     Space,
     TimeStep,
@@ -328,6 +338,49 @@ def test_tuple_obs_interface():
     assert obs[0].shape == (4, 4) and obs[1].shape == (4, 3)
     assert len(env.step(np.ones((4, 2)))) == 5
 
+def test_rlbench_interface():
+    env = RLBenchMockEnv(seed = 0)
+    descs, obs = env.reset()
+
+    assert isinstance(descs, list) and len(descs) > 0
+    assert hasattr(obs, 'get_low_dim_data')
+    assert len(env.step(np.ones(8))) == 3
+
+def test_calvin_interface():
+    env = CalvinMockEnv(seed = 0)
+    instruction, obs = env.reset()
+
+    assert isinstance(instruction, str) and len(instruction) > 0
+    assert set(obs) == {'robot_obs', 'rgb_obs'}
+    assert len(env.step(np.ones(7))) == 5
+
+# (env class, action dim, reset obs keys, step arity)
+
+NEW_ROBOTICS_CASES = [
+    (OmniGibsonMockEnv, 6, {'robot0_proprio', 'rgb'}, 5),
+    (RoboMimicMockEnv, 7, {'robot0_eef_pos', 'robot0_eef_quat', 'object'}, 4),
+    (MyoSuiteMockEnv, 12, None, 5),
+    (GymnasiumRoboticsMockEnv, 4, {'observation', 'achieved_goal', 'desired_goal'}, 5),
+    (LeRobotMockEnv, 14, {'agent_pos', 'pixels'}, 5),
+    (PushTMockEnv, 2, {'agent_pos', 'block_pose'}, 5),
+    (DroneAviaryMockEnv, 4, None, 5),
+]
+
+@pytest.mark.parametrize(
+    'env_cls, action_dim, obs_keys, step_arity',
+    NEW_ROBOTICS_CASES,
+    ids = [case[0].__name__ for case in NEW_ROBOTICS_CASES]
+)
+def test_new_robotics_interfaces(env_cls, action_dim, obs_keys, step_arity):
+    env = env_cls(seed = 0)
+    obs = env.reset()
+    obs = obs[0] if isinstance(obs, tuple) else obs
+
+    if obs_keys:
+        assert set(obs) == obs_keys
+
+    assert len(env.step(np.ones(action_dim))) == step_arity
+
 # ---------- determinism under seed ----------
 
 DETERMINISTIC_CASES = [
@@ -341,16 +394,22 @@ DETERMINISTIC_CASES = [
     (IsaacMockEnv(), torch.ones(4, 2), 'isaac'),
     (MjlabMockEnv(), torch.ones(4, 2), 'mjlab'),
     (RobosuiteMockEnv(), np.ones(4), 'robosuite'),
+    (RLBenchMockEnv(), np.ones(8), 'rlbench'),
+    (OmniGibsonMockEnv(), np.ones(6), 'omnigibson'),
+    (RoboMimicMockEnv(), np.ones(7), 'robomimic'),
+    (MyoSuiteMockEnv(), np.ones(12), 'myosuite'),
+    (GymnasiumRoboticsMockEnv(), np.ones(4), 'gym_robotics'),
+    (LeRobotMockEnv(), np.ones(14), 'lerobot'),
+    (CalvinMockEnv(), np.ones(7), 'calvin'),
+    (PushTMockEnv(), np.ones(2), 'pusht'),
+    (DroneAviaryMockEnv(), np.ones(4), 'drone_aviary'),
 ]
 
 @pytest.mark.parametrize('env, action, name', DETERMINISTIC_CASES, ids = lambda x: x if isinstance(x, str) else '')
 def test_seeded_reset_deterministic(env, action, name):
     env.seed(7)
-    out_a = env.reset()
+    obs_a, _ = normalize_reset_out(env.reset())
     env.seed(7)
-    out_b = env.reset()
-
-    obs_a = out_a[0] if isinstance(out_a, tuple) else out_a
-    obs_b = out_b[0] if isinstance(out_b, tuple) else out_b
+    obs_b, _ = normalize_reset_out(env.reset())
 
     assert all(np.array_equal(np.asarray(x), np.asarray(y)) for x, y in zip(leaves(obs_a), leaves(obs_b)))

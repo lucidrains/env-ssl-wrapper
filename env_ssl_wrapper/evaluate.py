@@ -19,7 +19,7 @@ from .standardize.helpers import (
     first_existing,
     get_adapter,
     get_attr,
-    is_array,
+    is_array_like,
     is_vectorized,
     normalize_reset_out,
     normalize_step_out,
@@ -120,7 +120,7 @@ def to_action(env, out, deterministic = True):
 
 def to_actor_obs(obs, device, batched):
     def convert(x):
-        if not (is_array(x) or callable(get_attr(x, '__array__'))):
+        if not is_array_like(x):
             return x
 
         tensor = x if is_tensor(x) else torch.as_tensor(np.asarray(x))

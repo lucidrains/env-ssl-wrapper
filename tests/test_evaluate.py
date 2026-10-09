@@ -244,6 +244,18 @@ def test_evaluate_actor_seedless_reset():
 
     assert stats.num_episodes == 1
 
+def test_evaluate_actor_foreign_array_obs():
+    from env_ssl_wrapper.mocks import BraxMockEnv
+
+    def actor(obs):
+        assert isinstance(obs, torch.Tensor)
+        return torch.zeros(4, 2)
+
+    stats = evaluate_actor(actor, BraxMockEnv(), episodes = 2)
+
+    assert stats.num_episodes == 2
+    assert torch.allclose(stats.returns, torch.full((2,), 40.))
+
 # rendering that yields nothing returns no frame instead of crashing
 
 class NoRenderEnv:

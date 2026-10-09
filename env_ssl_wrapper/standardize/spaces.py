@@ -43,6 +43,9 @@ def space_from_action_spec(env):
 
 # action-space duck-typing across gymnasium, dm_control, and custom envs
 
+def shape_dim(shape) -> int:
+    return int(np.prod(shape)) if len(shape) > 0 else 1
+
 def action_space_dim(space) -> int | None:
     if not exists(space):
         return None
@@ -56,10 +59,29 @@ def action_space_dim(space) -> int | None:
         return int(np.prod(nvec))
 
     shape = get_attr(space, 'shape')
-    if exists(shape):
-        return int(np.prod(shape)) if len(shape) > 0 else 1
+    return shape_dim(shape) if exists(shape) else None
 
-    return None
+def space_dim(space) -> int | None:
+    # flat dim of an observation space tree — composite spaces sum their children
+
+    if not exists(space):
+        return None
+
+    shape = get_attr(space, 'shape')
+    if exists(shape):
+        return shape_dim(shape)
+
+    subspaces = get_attr(space, 'spaces')
+    if not exists(subspaces):
+        return None
+
+    child_spaces = subspaces.values() if isinstance(subspaces, dict) else subspaces
+    child_dims = [space_dim(child) for child in child_spaces]
+
+    if not child_dims or not all(map(exists, child_dims)):
+        return None
+
+    return sum(child_dims)
 
 def action_space_is_discrete(space) -> bool:
     return exists(get_attr(space, 'n'))
@@ -92,9 +114,4 @@ def action_dim_of(env) -> int | None:
 def obs_dim_of(env) -> int | None:
     from .helpers import get_adapter
     space = get_adapter(env).observation_space
-    shape = get_attr(space, 'shape')
-
-    if exists(shape):
-        return int(np.prod(shape)) if len(shape) > 0 else 1
-
-    return get_attr(env, 'obs_dim')
+    return default(space_dim(space), get_attr(env, 'obs_dim'))

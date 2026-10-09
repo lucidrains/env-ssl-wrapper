@@ -59,13 +59,26 @@ def get_batch_size(tree) -> int | None:
 
     first = leaves[0]
 
-    if is_array(first):
-        return len(first) if first.ndim > 0 else None
+    if isinstance(first, (str, bytes)):
+        return None
+
+    ndim = get_attr(first, 'ndim')
+
+    if exists(ndim):
+        return len(first) if ndim > 0 else None
 
     return len(first) if exists(get_attr(first, '__len__')) else None
 
 def is_array(v):
     return is_tensor(v) or isinstance(v, np.ndarray)
+
+def is_foreign_array(v):
+    # array-like types from foreign frameworks (e.g. jax.Array, pil Image)
+    # that implement numpy's __array__ conversion protocol
+    return not is_array(v) and callable(get_attr(v, '__array__'))
+
+def is_array_like(v):
+    return is_array(v) or is_foreign_array(v)
 
 def to_numpy(t):
     return t.detach().cpu().numpy() if is_tensor(t) else np.asarray(t)
@@ -101,28 +114,97 @@ def zero_like(x):
     arr = np.asarray(x)
     return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
 
+def normalize_obs(obs):
+    # raw arrays / scalars / text / containers pass through — custom observation
+    # objects (rlbench, ...) flatten via get_low_dim_data or unpack their
+    # public array, scalar, or container attributes
+
+    if is_array_like(obs) or is_scalar(obs) or isinstance(obs, (str, bytes, dict, list, tuple)):
+        return obs
+
+    low_dim = get_attr(obs, 'get_low_dim_data')
+
+    if callable(low_dim):
+        try:
+            flattened = low_dim()
+            if exists(flattened):
+                return flattened
+        except Exception:
+            pass
+
+    out = {}
+    for key in dir(obs):
+        if key.startswith('_'):
+            continue
+
+        value = get_attr(obs, key)
+
+        if callable(value):
+            continue
+
+        if is_array_like(value) or is_scalar(value) or isinstance(value, (dict, list, tuple)):
+            out[key] = value
+
+    return out if out else obs
+
+def contains_array(x):
+    # deep array-leaf check over nested containers — used to tell an obs tree
+    # apart from a plain info dict when language instructions come first
+
+    if isinstance(x, dict):
+        return any(contains_array(v) for v in x.values())
+
+    if isinstance(x, (list, tuple)):
+        return any(contains_array(v) for v in x)
+
+    return is_array_like(x)
+
+def is_instruction(x):
+    if isinstance(x, str):
+        return True
+
+    return isinstance(x, (list, tuple)) and len(x) > 0 and all(isinstance(d, str) for d in x)
+
+def as_descriptions(x):
+    return [x] if isinstance(x, str) else list(x)
+
 def normalize_reset_out(out):
     if is_time_step(out):
-        return out.observation, {}
+        return normalize_obs(out.observation), {}
 
-    if isinstance(out, tuple) and len(out) == 2:
-        obs, info = out
-        return obs, {} if info is None else (info if isinstance(info, dict) else {})
+    if isinstance(out, tuple):
+        if len(out) == 2:
+            first, second = out
 
-    return out, {}
+            # language-conditioned robotics (e.g. rlbench, calvin, language-table):
+            # (instruction(s), obs) — a plain info dict in second means text observation
+
+            if is_instruction(first) and (not isinstance(second, dict) or contains_array(second)):
+                return normalize_obs(second), dict(descriptions = as_descriptions(first))
+
+            info = second if isinstance(second, dict) else {}
+            return normalize_obs(first), info
+
+        if len(out) == 3 and is_instruction(out[0]):
+            obs = normalize_obs(out[1])
+            info = out[2] if isinstance(out[2], dict) else {}
+            return obs, {**info, 'descriptions': as_descriptions(out[0])}
+
+    return normalize_obs(out), {}
 
 def normalize_step_out(out):
     if is_time_step(out):
         last = out.last() if callable(get_attr(out, 'last')) else out.step_type == 2
-        return out.observation, out.reward, last, False, dict(discount = out.discount)
+        return normalize_obs(out.observation), out.reward, last, False, dict(discount = out.discount)
 
     if len(out) == 5:
-        return out
+        obs, reward, terminated, truncated, info = out
+        return normalize_obs(obs), reward, terminated, truncated, info if isinstance(info, dict) else {}
 
     if len(out) in (3, 4):
         obs, reward, done, *rest = out
         info = rest[0] if rest and isinstance(rest[0], dict) else {}
-        return obs, reward, done, zero_like(done), info
+        return normalize_obs(obs), reward, done, zero_like(done), info
 
     raise ValueError(f'could not standardize step output of length {len(out)}')
 
@@ -135,7 +217,7 @@ def _zero_leaf(x):
         return False
     if isinstance(x, (int, float, np.number)):
         return np.zeros_like(x)
-    if exists(get_attr(x, '__array__')):
+    if is_foreign_array(x):
         return np.zeros_like(np.asarray(x))
     return 0
 
@@ -173,11 +255,11 @@ def unpack_vector_observations(arr):
     if isinstance(arr, np.ndarray) and arr.dtype != object:
         return arr
 
-    sample = next((x for x in arr if x is not None), None)
-    if sample is None:
+    sample = next((x for x in arr if exists(x)), None)
+    if not exists(sample):
         return arr
 
-    trees = [tree_map(_zero_leaf, sample) if x is None else x for x in arr]
+    trees = [tree_map(_zero_leaf, sample) if not exists(x) else x for x in arr]
     return stack_trees(trees)
 
 # environment probes
@@ -336,12 +418,12 @@ class TransformObservationWrapper(EnvWrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        obs = self.transform_obs(obs)
+        obs = self.transform(obs, done = None)
 
         if isinstance(info, dict):
             for key in FINAL_OBSERVATION_KEYS:
                 if key in info:
-                    info[key] = self.transform_obs(info[key])
+                    info[key] = self.transform(info[key], done = None)
 
         return obs, info
 
@@ -349,17 +431,16 @@ class TransformObservationWrapper(EnvWrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         done = dones_of(terminated, truncated) if self.autoresets else None
 
-        out = self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
+        out = self.transform(obs, done = done)
 
         if isinstance(info, dict):
             for key in FINAL_OBSERVATION_KEYS:
                 if key in info:
                     if not self.takes_done:
-                        info[key] = self.transform_obs(info[key])
+                        info[key] = self.transform(info[key])
                     elif not self.autoresets:
                         info[key] = out
 
         return out, reward, terminated, truncated, info
 
 ObservationWrapper = TransformObservationWrapper
-
