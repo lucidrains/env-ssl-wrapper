@@ -5,7 +5,6 @@ import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
-from einops import rearrange
 
 from .helpers import EnvWrapper, copy_leaf, default, exists, first_existing, get_attr
 from .spaces import space_from_action_spec
@@ -95,7 +94,7 @@ class ActionTransformWrapper(EnvWrapper):
         was_scalar = t.ndim == 0
 
         if was_scalar:
-            t = rearrange(t, '-> 1')
+            t = t[None]
 
         # bounds may be unbatched (single_action_space) or already batched
         # (vector envs exposing only a batched action_space)
@@ -105,22 +104,28 @@ class ActionTransformWrapper(EnvWrapper):
             low = np.broadcast_to(low, (dim,))
             high = np.broadcast_to(high, (dim,))
 
+        # invalid (unbounded) dims pass through — neutral bounds keep inf out of the arithmetic
+
         valid = np.isfinite(low) & np.isfinite(high)
 
         if is_tensor(t):
-            low = torch.tensor(low, device = t.device, dtype = t.dtype)
-            high = torch.tensor(high, device = t.device, dtype = t.dtype)
-            valid = torch.tensor(valid, device = t.device)
+            valid_t = torch.as_tensor(valid, device = t.device)
+            low = torch.as_tensor(np.where(valid, low, 0.), device = t.device, dtype = t.dtype)
+            high = torch.as_tensor(np.where(valid, high, 1.), device = t.device, dtype = t.dtype)
+        else:
+            valid_t = valid
+            low = np.where(valid, low, 0.)
+            high = np.where(valid, high, 1.)
 
         rescaled = rescale(t, self.from_range, (low, high))
 
         if is_tensor(t):
-            rescaled = torch.where(valid, torch.clamp(rescaled, low, high), t)
+            rescaled = torch.where(valid_t, torch.clamp(rescaled, low, high), t)
         else:
-            rescaled = np.where(valid, np.clip(rescaled, low, high), t)
+            rescaled = np.where(valid_t, np.clip(rescaled, low, high), t)
 
         if was_scalar:
-            rescaled = rearrange(rescaled, '1 ->')
+            rescaled = rescaled[0]
 
         return rescaled
 

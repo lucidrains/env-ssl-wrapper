@@ -5,7 +5,6 @@ from functools import partial
 import numpy as np
 import torch
 from torch.utils._pytree import tree_map
-from einops import rearrange
 
 from .helpers import (
     FINAL_OBSERVATION_KEYS,
@@ -40,22 +39,12 @@ def maybe_expand_dim(x):
 
     def _expand(t):
         arr = to_numeric_array(t)
+        return arr[None] if is_array(arr) else t
 
-        if not is_array(arr):
-            return t
+    if is_array(x):
+        return x[None]
 
-        if arr.ndim == 0:
-            return rearrange(arr, '-> 1')
-
-        return rearrange(arr, '... -> 1 ...')
-
-    if is_tensor(x):
-        return rearrange(x, '-> 1') if x.ndim == 0 else rearrange(x, '... -> 1 ...')
-
-    if isinstance(x, np.ndarray) and x.dtype.kind in 'biufc':
-        return rearrange(x, '-> 1') if x.ndim == 0 else rearrange(x, '... -> 1 ...')
-
-    return tree_map(_expand, x)
+    return tree_map(_expand, x) if isinstance(x, (dict, list, tuple)) else _expand(x)
 
 def is_integer_dtype(t):
     if is_tensor(t):
@@ -120,11 +109,11 @@ def heuristic_leaf(t, is_vector = False):
         return arr
 
     if not is_vector and arr.ndim > 1 and arr.shape[0] == 1:
-        arr = rearrange(arr, '1 ... -> ...')
+        arr = arr.reshape(*arr.shape[1:])
 
     if is_integer_dtype(arr):
         while arr.ndim > 1 and arr.shape[-1] == 1:
-            arr = rearrange(arr, '... 1 -> ...')
+            arr = arr.reshape(*arr.shape[:-1])
 
         if not is_vector and (arr.numel() if is_tensor(arr) else arr.size) == 1:
             return arr.item()
@@ -206,7 +195,8 @@ class AutoBatchedWrapper(EnvWrapper):
         if self.is_vector:
             return out
 
-        obs, reward, terminated, truncated, info = *maybe_expand_dim(out[:4]), out[4]
+        obs, reward, terminated, truncated, info = out
+        obs, reward, terminated, truncated = (maybe_expand_dim(t) for t in (obs, reward, terminated, truncated))
 
         if isinstance(info, dict):
             for key in FINAL_OBSERVATION_KEYS:

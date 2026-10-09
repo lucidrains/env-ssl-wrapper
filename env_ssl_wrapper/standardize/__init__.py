@@ -120,6 +120,7 @@ __all__ = [
     'MultiprocessingVecEnv',
     'StandardizeEnvWrapper',
     'StandardizeEnv',
+    'StandardizedEnv',
     'BaseEnvAdapter',
     'get_adapter',
     'register_adapter',

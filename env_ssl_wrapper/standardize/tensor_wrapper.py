@@ -32,6 +32,10 @@ def to_torch_leaf(t, device, cast_obs_to_float = True):
             return t
 
     dtype = torch.float32 if cast_obs_to_float and t.dtype != torch.bool else t.dtype
+
+    if t.dtype == dtype and t.device == device:
+        return t
+
     return t.to(device = device, dtype = dtype)
 
 def numpy_to_torch(x, device, cast_obs_to_float = True):
@@ -72,7 +76,11 @@ def torch_to_numpy(x):
 def contract(t, to_float = False):
     if not is_tensor(t):
         return t
-    return t.float() if to_float else t.bool()
+
+    if to_float:
+        return t if t.dtype == torch.float32 else t.float()
+
+    return t if t.dtype == torch.bool else t.bool()
 
 # class
 
@@ -105,7 +113,7 @@ class TensorWrapper(EnvWrapper):
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
     def cast_info(self, info):
-        if not isinstance(info, dict):
+        if not isinstance(info, dict) or not info:
             return
 
         for key in FINAL_OBSERVATION_KEYS:
@@ -126,10 +134,14 @@ class TensorWrapper(EnvWrapper):
         return obs, info
 
     def to_contract(self, t, to_float = False):
-        if not isinstance(t, (dict, list, tuple)):
-            leaf = to_torch_leaf(t, self.device, cast_obs_to_float = False)
+        def convert(leaf):
+            leaf = to_torch_leaf(leaf, self.device, cast_obs_to_float = False)
             return contract(leaf, to_float = to_float)
-        return contract(self.cast(t), to_float = to_float)
+
+        if not isinstance(t, (dict, list, tuple)):
+            return convert(t)
+
+        return tree_map(convert, t)
 
     def step(self, action):
         if self.convert_in and not self.torch_native:

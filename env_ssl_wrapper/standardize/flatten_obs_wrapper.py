@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten
-from einops import rearrange
 
 from .helpers import (
     TransformObservationWrapper,
@@ -30,17 +29,9 @@ def flatten_leaf(t, is_vector = False):
         t = np.asarray(t)
 
     if not is_vector:
-        if t.ndim == 0:
-            return rearrange(t, '-> 1')
-        return rearrange(t, '... -> (...)')
+        return t.reshape(1) if t.ndim == 0 else t.reshape(-1)
 
-    if t.ndim == 0:
-        return rearrange(t, '-> 1 1')
-
-    if t.ndim == 1:
-        return rearrange(t, 'b -> b 1')
-
-    return rearrange(t, 'b ... -> b (...)')
+    return t.reshape(1, 1) if t.ndim == 0 else t.reshape(t.shape[0], -1)
 
 def concat_leaves(leaves, is_vector = False):
     axis = -1 if is_vector else 0

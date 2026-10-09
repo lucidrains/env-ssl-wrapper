@@ -137,3 +137,22 @@ def test_torch_to_numpy_zero_copy_on_cpu():
     arr = torch_to_numpy(t)
 
     assert np.shares_memory(arr, t.numpy())
+
+# container rewards / dones contract leaf-wise — integer done flags must land as bool
+
+class TupleDoneEnv:
+    def reset(self, **kwargs):
+        return np.zeros(2), {}
+
+    def step(self, action):
+        return np.zeros(2), (1.0, 2.0), (np.int64(1), False), (np.int64(0), True), {}
+
+def test_container_dones_contract_to_bool():
+    env = TensorWrapper(TupleDoneEnv(), device = 'cpu')
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(None)
+
+    assert all(t.dtype == torch.bool for t in terminated)
+    assert all(t.dtype == torch.bool for t in truncated)
+    assert all(r.dtype == torch.float32 for r in reward)

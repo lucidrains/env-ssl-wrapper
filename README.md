@@ -212,6 +212,29 @@ with MultiprocessingVecEnv('CartPole-v1', num_envs = 8) as env:
     obs, info = env.reset()
 ```
 
+## Evaluation
+
+`evaluate_actor` rolls a policy through any standardized env and returns per-episode stats, optionally recording videos.
+
+```python
+import gymnasium as gym
+from env_ssl_wrapper import StandardizeEnvWrapper, evaluate_actor
+
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+
+stats = evaluate_actor(policy, env, episodes = 10, seed = 0)
+
+stats.mean          # mean return
+stats.std           # std of returns
+stats.min, stats.max
+stats.success_rate(475.)          # fraction of episodes above a threshold
+stats.summary()                   # dict(episodes, mean, std, min, max)
+
+# deterministic = False samples from distributions instead of collapsing to the mode
+# an actor exposing `.dist` takes precedence over calling it directly
+# video_path = 'eval.mp4' records the first video_episodes episodes (single env only)
+```
+
 ## Tests
 
 ```bash

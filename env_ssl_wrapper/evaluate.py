@@ -9,6 +9,7 @@ from torch import nn, is_tensor
 from torch.distributions import Categorical, Distribution
 from torch.utils._pytree import tree_flatten, tree_map
 
+from .standardize.spaces import action_space_is_discrete
 from .standardize.helpers import (
     EnvWrapper,
     env_autoresets,
@@ -93,7 +94,19 @@ def to_action(env, out, deterministic = True):
         if not deterministic:
             return out.sample()
 
-        return out.probs.argmax(dim = -1) if exists(get_attr(out, 'probs')) else out.mean
+        probs = get_attr(out, 'probs')
+
+        # categorical-style probs carry a trailing action axis to argmax over
+
+        if exists(probs) and probs.ndim >= 2 and probs.shape[-1] > 1:
+            return probs.argmax(dim = -1)
+
+        # bernoulli-style probabilities threshold at 0.5
+
+        if exists(probs):
+            return (probs > 0.5).long()
+
+        return out.mean
 
     if is_tensor(out) and out.is_floating_point() and out.ndim > 0:
         num_actions = get_attr(get_adapter(env).action_space, 'n')
@@ -136,10 +149,21 @@ def to_env_action(env, action):
 
         action = to_numpy(action)
 
-        if action.ndim > 1 and action.shape[0] == 1:
-            action = action[0]
+        # single raw sims get the leading batch dim stripped, while discrete
+        # actions additionally collapse to scalars
 
-        return action.item() if action.ndim == 0 else action
+        if not is_vectorized(env):
+            if action.ndim > 1 and action.shape[0] == 1:
+                action = action[0]
+
+            if action_space_is_discrete(get_adapter(env).action_space):
+                if action.ndim > 0 and action.shape[0] == 1:
+                    action = action[0]
+
+                if action.ndim == 0:
+                    action = action.item()
+
+        return action
 
     # wrappers take batched torch actions - pad up to the declared rank
 
@@ -168,6 +192,9 @@ def capture_frame(env):
             frame = env_render(env, 256, 256)
         except Exception:
             return None
+
+    if not exists(frame):
+        return None
 
     if is_tensor(frame):
         frame = frame.detach().cpu().numpy()
@@ -199,6 +226,17 @@ def save_video(frames, path, fps = 30):
 def video_path_at(path, index):
     path = Path(path)
     return str(path if index == 0 else path.with_name(f'{path.stem}_ep{index}{path.suffix}'))
+
+def safe_reset(env, seed = None):
+    # gymnasium resets accept seed; legacy sims reset without it
+
+    if exists(seed):
+        try:
+            return normalize_reset_out(env.reset(seed = seed))
+        except TypeError:
+            pass
+
+    return normalize_reset_out(env.reset())
 
 # evaluate
 
@@ -241,7 +279,7 @@ def evaluate_actor(
 
     assert not (record and num_envs > 1), 'video recording requires a single env'
 
-    obs, info = normalize_reset_out(env.reset(seed = seed) if exists(seed) else env.reset())
+    obs, info = safe_reset(env, seed)
     batched = is_vectorized(env) or all(map(is_tensor, tree_flatten(obs)[0]))
 
     goal = goal.expand(num_envs, -1) if exists(goal) and goal.shape[0] == 1 and num_envs > 1 else goal
@@ -249,6 +287,7 @@ def evaluate_actor(
     returns = torch.zeros(num_envs)
     lengths = torch.zeros(num_envs)
     steps = torch.zeros(num_envs, dtype = torch.long)
+    active = np.ones(num_envs, dtype = bool)
 
     done_returns, done_lengths, videos, frames = [], [], [], []
 
@@ -285,7 +324,12 @@ def evaluate_actor(
             if exists(max_steps):
                 done |= to_numpy(steps >= max_steps).reshape(-1)
 
-            for i in np.where(done)[0]:
+            # a slot is only recorded once per episode — non-autoreset slots
+            # latch their done flag until the whole vector env resets
+
+            newly_done = done & active
+
+            for i in np.where(newly_done)[0]:
                 if len(done_returns) >= episodes:
                     break
 
@@ -309,6 +353,7 @@ def evaluate_actor(
                 returns[i] = 0.
                 lengths[i] = 0.
                 steps[i] = 0
+                active[i] = False
 
             if done.any() and len(done_returns) < episodes:
                 if record:
@@ -318,7 +363,10 @@ def evaluate_actor(
 
                 if not env_autoresets(env) and (num_envs == 1 or done.all() or bool(get_attr(env, 'needs_reset', False))):
                     reset_seed = seed + len(done_returns) if exists(seed) and num_envs == 1 else None
-                    obs, info = normalize_reset_out(env.reset(seed = reset_seed) if exists(reset_seed) else env.reset())
+                    obs, info = safe_reset(env, reset_seed)
+                    active[:] = True
+                elif env_autoresets(env):
+                    active[newly_done] = True
     finally:
         if exists(module) and exists(was_training):
             module.train(was_training)

@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
-from einops import rearrange
 
 from .helpers import (
     EnvWrapper,
@@ -28,7 +27,7 @@ def broadcast_mask(mask, x):
     m = torch.as_tensor(mask, device = x.device, dtype = torch.bool)
     diff = x.ndim - m.ndim
 
-    return rearrange(m, f'... -> ... {" ".join(["1"] * diff)}') if diff > 0 else m
+    return m.reshape(*m.shape, *((1,) * diff)) if diff > 0 else m
 
 def zero_mask(x, mask, fill_scalar = None):
     if is_tensor(x):

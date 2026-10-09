@@ -3,7 +3,6 @@ from typing import Sequence
 
 import torch
 from torch import is_tensor
-from torch_einops_utils import pad_right_ndim_to
 
 from .standardize.helpers import (
     TransformObservationWrapper,
@@ -27,7 +26,11 @@ def calc_lerp_weight(lam, done, x):
         done = torch.as_tensor(done, device = x.device)
 
     weight = torch.where(done, 1., 1. - lam).to(x)
-    return pad_right_ndim_to(weight, x.ndim)
+
+    if x.ndim <= weight.ndim:
+        return weight
+
+    return weight.reshape(*weight.shape, *((1,) * (x.ndim - weight.ndim)))
 
 # Partially Observable Reinforcement Learning with Memory Traces - Eberhard et al.
 # https://arxiv.org/abs/2503.15200

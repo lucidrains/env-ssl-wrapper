@@ -182,6 +182,22 @@ def test_memory_trace_invalid_lambdas():
     with pytest.raises(AssertionError):
         MemoryTraceWrapper(MockEnv(), lambdas = -0.1)
 
+def test_memory_trace_scalar_obs_done_step():
+    class ScalarObsEnv:
+        autoresets = True
+
+        def reset(self, **kwargs):
+            return torch.tensor(1.0), {}
+
+        def step(self, action):
+            return torch.tensor(2.0), 1.0, True, False, {}
+
+    env = MemoryTraceWrapper(ScalarObsEnv(), lambdas = 0.5)
+    env.reset()
+
+    obs, *_ = env.step(None)
+    assert torch.allclose(obs['trace'], torch.tensor(2.0))
+
 def test_memory_trace_all_export():
     import env_ssl_wrapper
     assert 'MemoryTraceWrapper' in env_ssl_wrapper.__all__

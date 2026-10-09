@@ -1,6 +1,6 @@
 [project]
 name = "env-ssl-wrapper"
-version = "0.5.1"
+version = "0.5.2"
 description = "One torch-native interface for any MDP environment"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -24,16 +24,11 @@ classifiers=[
 ]
 
 dependencies = [
-    "discrete-continuous-embed-readout",
-    "einx>=0.3.0",
     "einops>=0.8.1",
     "imageio",
     "imageio-ffmpeg",
-    "memmap-replay-buffer",
+    "numpy>=1.24",
     "torch>=2.5",
-    "torch-einops-utils>=0.0.29",
-    "x-transformers",
-    "x-mlps-pytorch",
 ]
 
 [project.urls]

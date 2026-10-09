@@ -84,9 +84,6 @@ def copy_leaf(x):
 
     return x
 
-def copy_tree(tree):
-    return tree_map(copy_leaf, tree)
-
 def dones_of(terminated, truncated):
     if not isinstance(terminated, (dict, list, tuple)):
         return terminated | truncated
@@ -138,6 +135,8 @@ def _zero_leaf(x):
         return False
     if isinstance(x, (int, float, np.number)):
         return np.zeros_like(x)
+    if exists(get_attr(x, '__array__')):
+        return np.zeros_like(np.asarray(x))
     return 0
 
 def _stack_leaves(leaves):

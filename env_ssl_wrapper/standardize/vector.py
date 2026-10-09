@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from multiprocessing import get_context
 import numpy as np
-import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_map
 
@@ -118,6 +117,9 @@ class _InlineConn:
 
     def recv(self):
         return self._result
+
+    def close(self):
+        pass
 
 def _safe_send(conn, msg):
     """Send that swallows broken-pipe — for broadcast patterns where _recv_all reports the error."""

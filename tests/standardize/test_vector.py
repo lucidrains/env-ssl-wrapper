@@ -474,3 +474,20 @@ def test_multiprocessing_vec_env_autoreset_no_double_reset():
         assert env._conns[0].env.reset_count == initial_resets + 1
         assert 'final_observation' in info
 
+
+# jax-style array-likes zero-fill to real arrays, so they can be stacked with
+# live observations in final_observation bookkeeping
+
+def test_zero_leaf_jax_array():
+    from env_ssl_wrapper.helpers import _zero_leaf, stack_trees
+    from env_ssl_wrapper.mocks import JaxArray
+
+    arr = JaxArray(np.ones((2, 3)))
+    zero = _zero_leaf(arr)
+
+    assert isinstance(zero, np.ndarray)
+    assert zero.shape == (2, 3) and not zero.any()
+
+    stacked = stack_trees([arr, zero])
+    assert stacked.shape == (2, 2, 3)
+    assert np.allclose(stacked[0], 1.0) and np.allclose(stacked[1], 0.0)
