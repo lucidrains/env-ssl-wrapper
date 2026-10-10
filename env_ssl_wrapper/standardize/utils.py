@@ -60,48 +60,27 @@ def parse_wrapper(wrapper):
 def compose_env(env, *wrappers, pad_episodes: bool = True):
     env = instantiate_env(env)
 
-    funcs = []
-    classes = []
-
-    for wrapper in wrappers:
-        func, cls = parse_wrapper(wrapper)
-        funcs.append(func)
-        classes.append(cls)
+    items = [parse_wrapper(wrapper) for wrapper in wrappers]
+    classes = {cls for _, cls in items}
 
     if StandardizeWrapper not in classes:
-        funcs.insert(0, StandardizeWrapper)
-        classes.insert(0, StandardizeWrapper)
+        items.append((StandardizeWrapper, StandardizeWrapper))
 
     # vectorized envs get standardized episode padding + a persistent final_observation
     # (autoresetting envs re-emit the true terminal obs, so no padding for those)
 
     if pad_episodes and EpisodePaddingWrapper not in classes and is_vectorized(env):
         pad_wrapper = partial(EpisodePaddingWrapper, pad_autoreset = not env_autoresets(env))
-        funcs.insert(1, pad_wrapper)
-        classes.insert(1, EpisodePaddingWrapper)
+        items.append((pad_wrapper, EpisodePaddingWrapper))
 
-    from ..memory_trace import MemoryTraceWrapper
-    if MemoryTraceWrapper in classes and TensorWrapper in classes:
-        idx_mem = classes.index(MemoryTraceWrapper)
-        idx_ten = classes.index(TensorWrapper)
-        if idx_mem < idx_ten:
-            f = funcs.pop(idx_mem)
-            c = classes.pop(idx_mem)
-            idx_ten = classes.index(TensorWrapper)
-            funcs.insert(idx_ten + 1, f)
-            classes.insert(idx_ten + 1, c)
+    # sort by canonical pipeline priority (stable sort preserves user order for equal priorities)
 
-    # action chunking changes the step signature, so it always goes outermost
+    items.sort(key = lambda item: getattr(item[1], 'priority', 50))
 
-    from ..action_chunk import ActionChunkWrapper
-    if ActionChunkWrapper in classes:
-        idx_chunk = classes.index(ActionChunkWrapper)
-        funcs.append(funcs.pop(idx_chunk))
-        classes.append(classes.pop(idx_chunk))
-
+    classes = [cls for _, cls in items]
     assert len(set(classes)) == len(classes), 'duplicate wrappers found'
 
-    for func in funcs:
+    for func, _ in items:
         env = func(env)
 
     return env

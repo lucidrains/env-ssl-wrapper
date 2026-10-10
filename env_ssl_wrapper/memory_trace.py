@@ -6,15 +6,15 @@ from torch import is_tensor
 
 from .standardize.helpers import (
     TransformObservationWrapper,
-    exists,
-    default,
     any_true,
+    cast_tuple,
+    default,
+    exists,
+    is_array_like,
+    is_scalar,
 )
 
 # helper functions
-
-def cast_tuple(val):
-    return val if isinstance(val, (tuple, list)) else (val,)
 
 def calc_lerp_weight(lam, done, x):
     if not exists(done) or not any_true(done):
@@ -23,7 +23,9 @@ def calc_lerp_weight(lam, done, x):
     # reset trace on done, else decay
 
     if not is_tensor(done):
-        done = torch.as_tensor(done, device = x.device)
+        done = torch.as_tensor(done, device = x.device, dtype = torch.bool)
+    else:
+        done = done.to(device = x.device, dtype = torch.bool)
 
     weight = torch.where(done, 1., 1. - lam).to(x)
 
@@ -36,6 +38,7 @@ def calc_lerp_weight(lam, done, x):
 # https://arxiv.org/abs/2503.15200
 
 class MemoryTraceWrapper(TransformObservationWrapper):
+    priority = 80
 
     def __init__(
         self,
@@ -61,17 +64,26 @@ class MemoryTraceWrapper(TransformObservationWrapper):
         return f'{prefix}_{lam}' if len(self.lambdas) > 1 else prefix
 
     def transform_obs(self, obs, done = None):
-        out = dict(obs) if isinstance(obs, dict) else {self.obs_key: obs}
+        if isinstance(obs, (tuple, list)):
+            out = {f'{self.obs_key}_{i}': elem for i, elem in enumerate(obs)}
+        elif isinstance(obs, dict):
+            out = dict(obs)
+        else:
+            out = {self.obs_key: obs}
+
         target_keys = tuple(k for k in default(self.keys, tuple(out.keys())) if k in out)
 
         for key in target_keys:
             val = out.get(key)
 
-            if not exists(val):
+            if not exists(val) or not (is_array_like(val) or is_scalar(val)):
                 continue
 
             if not is_tensor(val):
-                val = torch.as_tensor(val)
+                try:
+                    val = torch.as_tensor(val)
+                except (TypeError, ValueError):
+                    continue
                 out[key] = val
 
             val_float = val.float() if not val.is_floating_point() else val

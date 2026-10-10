@@ -4,7 +4,7 @@ from functools import partial
 
 import numpy as np
 import torch
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
 
 from .helpers import (
     FINAL_OBSERVATION_KEYS,
@@ -35,16 +35,11 @@ def to_numeric_array(t):
     return arr if arr.dtype.kind in 'biufc' else t
 
 def maybe_expand_dim(x):
-    # add leading batch dim to every numeric leaf
-
     def _expand(t):
         arr = to_numeric_array(t)
         return arr[None] if is_array(arr) else t
 
-    if is_array(x):
-        return x[None]
-
-    return tree_map(_expand, x) if isinstance(x, (dict, list, tuple)) else _expand(x)
+    return tree_map(_expand, x)
 
 def is_integer_dtype(t):
     if is_tensor(t):
@@ -122,20 +117,12 @@ def heuristic_leaf(t, is_vector = False):
     return arr.item() if arr.ndim == 0 else arr
 
 def rebuild_container(x, leaves):
-
-    if isinstance(x, list):
-        return leaves
-
-    if exists(get_attr(type(x), '_fields')):
-        return type(x)(*leaves)
-
-    return type(x)(leaves)
+    return tree_unflatten(leaves, tree_structure(x))
 
 def is_numeric_container(x):
-    # purely numeric nested sequences count as one leaf when no space declares structure
-
     if isinstance(x, (list, tuple)):
-        return len(x) > 0 and all(is_numeric_container(item) for item in x)
+        leaves, _ = tree_flatten(x)
+        return len(leaves) > 0 and all(map(is_scalar, leaves))
 
     return is_scalar(x)
 
@@ -168,6 +155,7 @@ def maybe_squeeze_dim(x, shape_tree = None, is_vector = False, prepend_batch = F
 class AutoBatchedWrapper(EnvWrapper):
 
     is_auto_batched = True
+    priority = 50
 
     def __init__(self, env, is_vector: bool | None = None):
         super().__init__(env)
@@ -187,7 +175,16 @@ class AutoBatchedWrapper(EnvWrapper):
         if not exists(self.action_shape_tree):
             self.refresh_action_space()
 
-        return (maybe_expand_dim(obs), info) if not self.is_vector else (obs, info)
+        if self.is_vector:
+            return obs, info
+
+        obs = maybe_expand_dim(obs)
+        if isinstance(info, dict):
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info:
+                    info[key] = maybe_expand_dim(info[key])
+
+        return obs, info
 
     def step(self, action):
         action = maybe_squeeze_dim(action, shape_tree = self.action_shape_tree, is_vector = self.is_vector, prepend_batch = self.prepend_batch)

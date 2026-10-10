@@ -11,6 +11,7 @@ from .standardize.helpers import (
     default,
     any_true,
     dones_of,
+    env_takes_torch,
     first_existing,
     get_adapter,
     get_attr,
@@ -29,16 +30,20 @@ def chunk_steps(actions, axis):
 def unbatch_step(action):
     # chunks always carry a num_envs axis - drop it for plain single envs
     if is_tensor(action):
-        return action.squeeze(0)
+        action = action.squeeze(0)
+        return action.item() if action.ndim == 0 and not action.is_floating_point() else action
 
     if isinstance(action, np.ndarray):
-        return np.squeeze(action, axis = 0) if action.ndim > 0 else action
+        action = np.squeeze(action, axis = 0) if action.ndim > 0 else action
+        return action.item() if action.ndim == 0 and np.issubdtype(action.dtype, np.integer) else action
 
     return action
 
 # wrapper
 
 class ActionChunkWrapper(EnvWrapper):
+    priority = 100
+
     """
     Open-loop action chunking - executes a chunk of actions in one step,
     temporally compressing the environment by the chunk length.
@@ -71,7 +76,7 @@ class ActionChunkWrapper(EnvWrapper):
         self.action_shape = tuple(get_attr(action_space, 'shape', ()) or ())
 
         self.expects_batch = is_vectorized(env)
-        self.convert_in = not isinstance(env, EnvWrapper) and not get_adapter(env).torch_native
+        self.convert_in = not env_takes_torch(env)
 
     @property
     def chunk_action_shape(self):

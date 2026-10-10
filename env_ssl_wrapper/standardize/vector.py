@@ -3,20 +3,22 @@ from __future__ import annotations
 from multiprocessing import get_context
 import numpy as np
 from torch import is_tensor
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_flatten, tree_map, tree_unflatten
 
 from .helpers import (
     any_true,
     dones_of,
     exists,
+    get_adapter,
     get_attr,
     instantiate_env,
     safe_close,
     stack_trees,
+    to_numpy,
     truthy_attr,
     _zero_leaf,
 )
-from .spaces import action_dim_of, obs_dim_of
+from .spaces import action_dim_of, action_space_is_discrete, obs_dim_of
 from .standardize_wrapper import StandardizeWrapper
 
 # leaf helpers
@@ -48,6 +50,15 @@ class WorkerError(RuntimeError):
 
 def _exec(env, cmd, payload):
     if cmd == 'step':
+        if is_tensor(payload) and not get_adapter(env).torch_native:
+            payload = to_numpy(payload)
+
+        if action_space_is_discrete(env.action_space):
+            if hasattr(payload, 'item') and (not hasattr(payload, 'ndim') or payload.ndim <= 1):
+                payload = payload.item()
+            elif isinstance(payload, (list, tuple)) and len(payload) == 1:
+                payload = payload[0]
+
         obs, reward, terminated, truncated, info = env.step(payload)
 
         if any_true(dones_of(terminated, truncated)):
@@ -182,16 +193,14 @@ def _shutdown(conns, procs):
             pass
 
 def _split_actions(actions, num_envs):
-    if isinstance(actions, dict):
-        assert all(len(v) == num_envs for v in actions.values()), f'expected {num_envs} actions per key'
-        return [{k: v[i] for k, v in actions.items()} for i in range(num_envs)]
+    if isinstance(actions, list) and len(actions) == num_envs:
+        return actions
 
-    if isinstance(actions, tuple) and not is_tensor(actions) and not isinstance(actions, np.ndarray):
-        assert all(len(v) == num_envs for v in actions), f'expected {num_envs} actions per element'
-        return [tuple(elem[i] for elem in actions) for i in range(num_envs)]
-
-    assert len(actions) == num_envs, f'expected {num_envs} actions, but got {len(actions)}'
-    return actions
+    leaves, spec = tree_flatten(actions)
+    assert all(len(leaf) == num_envs for leaf in leaves), (
+        f'expected {num_envs} actions, but got {len(leaves[0]) if leaves else 0}'
+    )
+    return [tree_unflatten([leaf[i] for leaf in leaves], spec) for i in range(num_envs)]
 
 # class
 
@@ -270,16 +279,19 @@ class MultiprocessingVecEnv:
         _recv_all(self._conns)
 
     def reset(self, seed = None, **kwargs):
-        if exists(seed):
-            self.seed(seed)
-
-        for conn in self._conns:
-            _safe_send(conn, ('reset', kwargs))
+        for i, conn in enumerate(self._conns):
+            worker_kwargs = dict(kwargs)
+            if exists(seed):
+                worker_kwargs['seed'] = seed + i
+            _safe_send(conn, ('reset', worker_kwargs))
 
         results = _recv_all(self._conns)
         return stack_trees([obs for obs, _ in results]), _merge_infos([info for _, info in results])
 
     def step(self, actions):
+        if is_tensor(actions):
+            actions = to_numpy(actions)
+
         actions = _split_actions(actions, self.num_envs)
 
         for conn, action in zip(self._conns, actions):

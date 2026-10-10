@@ -12,9 +12,11 @@ from torch.utils._pytree import tree_flatten, tree_map
 from .standardize.spaces import action_space_is_discrete
 from .standardize.helpers import (
     EnvWrapper,
+    dones_of,
     env_autoresets,
     env_num_envs,
     env_render,
+    env_takes_torch,
     exists,
     first_existing,
     get_adapter,
@@ -90,31 +92,34 @@ def is_distribution(out):
 def to_action(env, out, deterministic = True):
     # distributions collapse to their mode, raw floating logits over a discrete space to their argmax
 
-    if is_distribution(out):
-        if not deterministic:
-            return out.sample()
+    def convert_leaf(val):
+        if is_distribution(val):
+            if not deterministic:
+                return val.sample()
 
-        probs = get_attr(out, 'probs')
+            probs = get_attr(val, 'probs')
 
-        # categorical-style probs carry a trailing action axis to argmax over
+            # categorical-style probs carry a trailing action axis to argmax over
 
-        if exists(probs) and probs.ndim >= 2 and probs.shape[-1] > 1:
-            return probs.argmax(dim = -1)
+            if exists(probs) and probs.ndim >= 2 and probs.shape[-1] > 1:
+                return probs.argmax(dim = -1)
 
-        # bernoulli-style probabilities threshold at 0.5
+            # bernoulli-style probabilities threshold at 0.5
 
-        if exists(probs):
-            return (probs > 0.5).long()
+            if exists(probs):
+                return (probs > 0.5).long()
 
-        return out.mean
+            return val.mean
 
-    if is_tensor(out) and out.is_floating_point() and out.ndim > 0:
-        num_actions = get_attr(get_adapter(env).action_space, 'n')
+        if is_tensor(val) and val.is_floating_point() and val.ndim > 0:
+            num_actions = get_attr(get_adapter(env).action_space, 'n')
 
-        if exists(num_actions) and out.shape[-1] == num_actions:
-            return out.argmax(dim = -1) if deterministic else Categorical(logits = out).sample()
+            if exists(num_actions) and val.shape[-1] == num_actions:
+                return val.argmax(dim = -1) if deterministic else Categorical(logits = val).sample()
 
-    return out
+        return val
+
+    return tree_map(convert_leaf, out)
 
 # states and actions
 
@@ -135,37 +140,14 @@ def to_actor_obs(obs, device, batched):
     return tree_map(convert, obs)
 
 def to_env_action(env, action):
-    if not is_tensor(action):
-        action = torch.as_tensor(action)
-
     device = get_attr(env, 'device')
-    action = action.to(device) if exists(device) else action
 
-    # raw simulators take unbatched numpy — torch-native sims take torch as-is (zero-copy)
+    def to_torch(a):
+        if not is_tensor(a):
+            a = torch.as_tensor(a)
+        return a.to(device) if exists(device) else a
 
-    if not isinstance(env, EnvWrapper):
-        if get_adapter(env).torch_native:
-            return action
-
-        action = to_numpy(action)
-
-        # single raw sims get the leading batch dim stripped, while discrete
-        # actions additionally collapse to scalars
-
-        if not is_vectorized(env):
-            if action.ndim > 1 and action.shape[0] == 1:
-                action = action[0]
-
-            if action_space_is_discrete(get_adapter(env).action_space):
-                if action.ndim > 0 and action.shape[0] == 1:
-                    action = action[0]
-
-                if action.ndim == 0:
-                    action = action.item()
-
-        return action
-
-    # wrappers take batched torch actions - pad up to the declared rank
+    action = tree_map(to_torch, action)
 
     chunk_shape = get_attr(env, 'chunk_action_shape')
 
@@ -173,10 +155,40 @@ def to_env_action(env, action):
         rank = len(chunk_shape) + 1
     else:
         space = first_existing(env, 'single_action_space', 'action_space')
-        rank = len(get_attr(space, 'shape', ())) + 1
+        shape = get_attr(space, 'shape')
+        rank = len(shape) + 1 if exists(shape) else None
 
-    while action.ndim < rank:
-        action = action[None]
+    if exists(rank):
+        def pad_rank(a):
+            while a.ndim < rank:
+                a = a[None]
+            return a
+
+        action = tree_map(pad_rank, action)
+
+    # raw simulators take unbatched numpy — torch-native sims take torch as-is (zero-copy)
+
+    if not env_takes_torch(env):
+        action = tree_map(to_numpy, action)
+
+        # single raw sims get the leading batch dim stripped, while discrete
+        # actions additionally collapse to scalars
+
+        if not is_vectorized(env) and not exists(chunk_shape):
+            def strip_leaf(a):
+                if a.ndim > 1 and a.shape[0] == 1:
+                    a = a[0]
+
+                if action_space_is_discrete(get_adapter(env).action_space):
+                    if a.ndim > 0 and a.shape[0] == 1:
+                        a = a[0]
+
+                    if a.ndim == 0:
+                        a = a.item()
+
+                return a
+
+            action = tree_map(strip_leaf, action)
 
     return action
 
@@ -319,7 +331,7 @@ def evaluate_actor(
             lengths += info.get('chunk_length', 1) if isinstance(info, dict) else 1
             steps += 1
 
-            done = to_numpy(terminated | truncated).astype(bool).reshape(-1)
+            done = to_numpy(dones_of(terminated, truncated)).astype(bool).reshape(-1)
 
             if exists(max_steps):
                 done |= to_numpy(steps >= max_steps).reshape(-1)

@@ -17,6 +17,8 @@ from .helpers import (
 # classes
 
 class DoneTrackerWrapper(EnvWrapper):
+    priority = 70
+
     def __init__(self, env):
         if not is_vectorized(env):
             env = AutoBatchedWrapper(env)

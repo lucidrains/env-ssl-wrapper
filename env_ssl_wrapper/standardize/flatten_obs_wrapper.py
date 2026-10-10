@@ -37,7 +37,9 @@ def concat_leaves(leaves, is_vector = False):
     axis = -1 if is_vector else 0
     leaves = [flatten_leaf(t, is_vector = is_vector) for t in leaves]
 
-    if is_tensor(leaves[0]):
+    if any(map(is_tensor, leaves)):
+        device = next(t.device for t in leaves if is_tensor(t))
+        leaves = [torch.as_tensor(t, device = device) if not is_tensor(t) else t.to(device) for t in leaves]
         return torch.cat(leaves, dim = axis)
 
     return np.concatenate(leaves, axis = axis)
@@ -45,6 +47,8 @@ def concat_leaves(leaves, is_vector = False):
 # class
 
 class FlattenObsWrapper(TransformObservationWrapper):
+    priority = 90
+
     def __init__(self, env, is_vector: bool | None = None):
         super().__init__(env)
         self.is_vector = default(is_vector, is_vectorized(env))

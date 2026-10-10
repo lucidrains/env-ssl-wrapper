@@ -9,6 +9,7 @@ from einops import rearrange
 from .helpers import (
     FINAL_OBSERVATION_KEYS,
     TransformObservationWrapper,
+    cast_tuple,
     env_render,
     env_render_mode,
     exists,
@@ -17,9 +18,6 @@ from .helpers import (
 )
 
 # helper functions
-
-def cast_tuple(t, length = 1):
-    return t if isinstance(t, tuple) else ((t,) * length)
 
 def render_frame(env, image_size = (64, 64), camera = None):
     # render from any sim — the shared env_render probe knows each image
@@ -72,6 +70,8 @@ def process_image(
 # class
 
 class ImageObservationWrapper(TransformObservationWrapper):
+    priority = 20
+
     def __init__(
         self,
         env,

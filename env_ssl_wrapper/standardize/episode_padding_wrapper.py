@@ -66,6 +66,8 @@ def merge_final(current, value, mask):
 # class
 
 class EpisodePaddingWrapper(EnvWrapper):
+    priority = 10
+
     def __init__(self, env, pad_autoreset: bool = True):
         super().__init__(env)
         self.is_vector = is_vectorized(env)

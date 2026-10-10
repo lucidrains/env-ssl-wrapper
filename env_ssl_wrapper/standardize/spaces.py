@@ -71,7 +71,7 @@ def space_dim(space) -> int | None:
     if exists(shape):
         return shape_dim(shape)
 
-    subspaces = get_attr(space, 'spaces')
+    subspaces = space if isinstance(space, (dict, list, tuple)) else get_attr(space, 'spaces')
     if not exists(subspaces):
         return None
 

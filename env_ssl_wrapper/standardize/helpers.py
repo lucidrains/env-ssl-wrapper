@@ -12,7 +12,14 @@ def exists(v):
     return v is not None
 
 def default(v, d):
-    return v if exists(v) else d
+    return v if exists(v) else (d() if callable(d) else d)
+
+def cast_tuple(val, length = 1):
+    if isinstance(val, tuple):
+        return val
+    if isinstance(val, list):
+        return tuple(val)
+    return (val,) * length
 
 def get_attr(obj, name, default = None):
     # properties that raise count as missing
@@ -84,9 +91,8 @@ def to_numpy(t):
     return t.detach().cpu().numpy() if is_tensor(t) else np.asarray(t)
 
 def any_true(x):
-    if is_tensor(x):
-        return bool(x.any())
-    return bool(np.asarray(x).any())
+    leaves, _ = tree_flatten(x)
+    return any(bool(leaf.any()) if is_tensor(leaf) else bool(np.asarray(leaf).any()) for leaf in leaves)
 
 def copy_leaf(x):
     if is_tensor(x):
@@ -98,8 +104,6 @@ def copy_leaf(x):
     return x
 
 def dones_of(terminated, truncated):
-    if not isinstance(terminated, (dict, list, tuple)):
-        return terminated | truncated
     return tree_map(lambda a, b: a | b, terminated, truncated)
 
 # sim step / reset normalization
@@ -107,12 +111,15 @@ def dones_of(terminated, truncated):
 def is_time_step(out):
     return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
 
-def zero_like(x):
+def _zero_bool_leaf(x):
     if is_tensor(x):
         return torch.zeros_like(x, dtype = torch.bool)
 
     arr = np.asarray(x)
     return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
+
+def zero_like(x):
+    return tree_map(_zero_bool_leaf, x)
 
 def normalize_obs(obs):
     # raw arrays / scalars / text / containers pass through — custom observation
@@ -148,16 +155,8 @@ def normalize_obs(obs):
     return out if out else obs
 
 def contains_array(x):
-    # deep array-leaf check over nested containers — used to tell an obs tree
-    # apart from a plain info dict when language instructions come first
-
-    if isinstance(x, dict):
-        return any(contains_array(v) for v in x.values())
-
-    if isinstance(x, (list, tuple)):
-        return any(contains_array(v) for v in x)
-
-    return is_array_like(x)
+    leaves, _ = tree_flatten(x)
+    return any(map(is_array_like, leaves))
 
 def is_instruction(x):
     if isinstance(x, str):
@@ -235,15 +234,9 @@ def stack_trees(trees):
     if isinstance(first, np.ndarray):
         return np.stack(trees)
 
-    if isinstance(first, dict):
-        return {key: stack_trees([t[key] for t in trees]) for key in first}
-
-    if isinstance(first, tuple):
-        return tuple(stack_trees([t[i] for t in trees]) for i in range(len(first)))
-
     leaves = [tree_flatten(tree)[0] for tree in trees]
     stacked = [_stack_leaves(col) for col in zip(*leaves)]
-    return tree_unflatten(stacked, tree_structure(trees[0]))
+    return tree_unflatten(stacked, tree_structure(first))
 
 def unpack_vector_observations(arr):
     # unpacks a 1D sequence / numpy object array of unbatched single-env observations
@@ -282,6 +275,18 @@ def env_render(env, height, width, camera = None):
 
 def is_vectorized(env) -> bool:
     return get_adapter(env).is_vectorized
+
+def env_takes_torch(env) -> bool:
+    if get_adapter(env).torch_native:
+        return True
+
+    current = env
+    while isinstance(current, EnvWrapper):
+        if type(current).__name__ == 'TensorWrapper' and getattr(current, 'convert_in', True):
+            return True
+        current = getattr(current, 'env', None)
+
+    return False
 
 # gymnasium 1.x surfaces final observations as 'final_obs' / '_final_obs', everything here uses 'final_observation' / '_final_observation'
 
@@ -373,6 +378,8 @@ def safe_close(env):
 # base wrapper
 
 class EnvWrapper:
+    priority = 50
+
     def __init__(self, env):
         self.env = env
 

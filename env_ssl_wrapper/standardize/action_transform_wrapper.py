@@ -57,6 +57,8 @@ def action_bounds(env):
 # wrapper
 
 class ActionTransformWrapper(EnvWrapper):
+    priority = 30
+
     def __init__(
         self,
         env,

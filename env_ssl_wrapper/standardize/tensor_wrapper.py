@@ -43,9 +43,6 @@ def numpy_to_torch(x, device, cast_obs_to_float = True):
     if isinstance(x, np.ndarray) and x.dtype == object:
         x = unpack_vector_observations(x)
 
-    if not isinstance(x, (dict, list, tuple)):
-        return to_torch_leaf(x, device, cast_obs_to_float)
-
     return tree_map(partial(to_torch_leaf, device = device, cast_obs_to_float = cast_obs_to_float), x)
 
 def to_numpy_leaf(t):
@@ -66,9 +63,6 @@ def to_numpy_leaf(t):
 
 def torch_to_numpy(x):
     # torch to numpy; 0-dim collapses to scalar, float64 → float32
-    if not isinstance(x, (dict, list, tuple)):
-        return to_numpy_leaf(x)
-
     return tree_map(to_numpy_leaf, x)
 
 # rewards float32, dones bool
@@ -85,6 +79,8 @@ def contract(t, to_float = False):
 # class
 
 class TensorWrapper(EnvWrapper):
+    priority = 60
+
     def __init__(
         self,
         env,
@@ -138,17 +134,15 @@ class TensorWrapper(EnvWrapper):
             leaf = to_torch_leaf(leaf, self.device, cast_obs_to_float = False)
             return contract(leaf, to_float = to_float)
 
-        if not isinstance(t, (dict, list, tuple)):
-            return convert(t)
-
         return tree_map(convert, t)
 
     def step(self, action):
         if self.convert_in:
             if not self.torch_native:
                 action = torch_to_numpy(action)
-            elif not is_tensor(action):
-                # torch-native sims take torch on device — lift numpy / foreign actions
+            elif is_tensor(action):
+                action = action.to(self.device)
+            else:
                 action = numpy_to_torch(action, device = self.device, cast_obs_to_float = False)
 
         obs, reward, terminated, truncated, info = self.env.step(action)

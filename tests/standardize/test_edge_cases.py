@@ -626,3 +626,112 @@ def test_done_tracker_zero_d_tensor():
     obs, rew, term, trunc, info = env.step(0)
     assert not term
 
+# new edge cases
+
+def test_evaluate_actor_wrapper_chain_without_tensor_wrapper():
+    import gymnasium as gym
+    from env_ssl_wrapper import evaluate_actor
+    env = TimeLimitWrapper(gym.make('CartPole-v1'), 20)
+    stats = evaluate_actor(lambda obs: torch.tensor([[1.0, 0.0]]), env, episodes = 1)
+    assert stats.num_episodes == 1
+
+def test_action_chunk_wrapper_without_tensor_wrapper():
+    import gymnasium as gym
+    from env_ssl_wrapper import ActionChunkWrapper
+    env = ActionChunkWrapper(TimeLimitWrapper(gym.make('CartPole-v1'), 20), chunk_len = 2)
+    env.reset()
+    obs, rew, term, trunc, info = env.step(torch.tensor([[0, 1]]))
+    assert info['chunk_length'] == 2
+
+def test_multiprocessing_vec_env_torch_actions():
+    from env_ssl_wrapper import MultiprocessingVecEnv
+    with MultiprocessingVecEnv('CartPole-v1', num_envs = 2) as env:
+        env.reset()
+        obs, reward, term, trunc, info = env.step(torch.tensor([0, 1]))
+        assert len(reward) == 2
+
+def test_multiprocessing_vec_env_trailing_dim_discrete_actions():
+    from env_ssl_wrapper import MultiprocessingVecEnv
+    with MultiprocessingVecEnv('CartPole-v1', num_envs = 2) as env:
+        env.reset()
+        obs, reward, term, trunc, info = env.step(np.array([[0], [1]]))
+        assert len(reward) == 2
+
+def test_space_dim_dictionary_of_spaces():
+    from env_ssl_wrapper.standardize.spaces import space_dim, InferredSpace
+    space = {'a': InferredSpace((4,)), 'b': InferredSpace((2,))}
+    assert space_dim(space) == 6
+
+def test_memory_trace_string_in_observation_dict():
+    from env_ssl_wrapper import MemoryTraceWrapper
+    class StringObsEnv:
+        def reset(self, **kwargs):
+            return {'state': torch.zeros(4), 'task': 'pick up red cup'}, {}
+        def step(self, action):
+            return {'state': torch.zeros(4), 'task': 'pick up red cup'}, 1.0, False, False, {}
+
+    env = MemoryTraceWrapper(StringObsEnv(), lambdas = 0.9)
+    obs, _ = env.reset()
+    assert 'task' in obs and obs['task'] == 'pick up red cup'
+    assert 'state_trace' in obs
+
+def test_flatten_obs_mixed_tensor_and_numpy():
+    class MixedEnv:
+        def reset(self, **kwargs):
+            return {'tensor': torch.zeros(2), 'numpy': np.zeros(3)}, {}
+        def step(self, action):
+            return {'tensor': torch.zeros(2), 'numpy': np.zeros(3)}, 1.0, False, False, {}
+
+    env = FlattenObsWrapper(MixedEnv())
+    obs, _ = env.reset()
+    assert is_tensor(obs)
+    assert obs.shape == (5,)
+
+def test_compose_env_flatten_obs_and_memory_trace_order():
+    import gymnasium as gym
+    env = compose_env(gym.make('CartPole-v1'), 'flatten_obs', ('memory_trace', dict(lambdas = (0.9, 0.99))))
+    obs, _ = env.reset()
+    assert is_tensor(obs)
+    assert not isinstance(obs, dict)
+
+def test_pytree_any_true_and_zero_like():
+    from env_ssl_wrapper.standardize.helpers import any_true, zero_like
+
+    dones_dict = {'agent_0': False, 'agent_1': torch.tensor([False, True])}
+    assert any_true(dones_dict)
+
+    all_false_dict = {'agent_0': False, 'agent_1': torch.tensor([False, False])}
+    assert not any_true(all_false_dict)
+
+    zeros = zero_like(dones_dict)
+    assert zeros['agent_0'] is False
+    assert (zeros['agent_1'] == 0).all() and zeros['agent_1'].dtype == torch.bool
+
+def test_pytree_split_actions():
+    from env_ssl_wrapper.standardize.vector import _split_actions
+
+    nested_actions = {
+        'arm': np.zeros((3, 4)),
+        'gripper': (np.ones((3, 1)), np.zeros((3, 2)))
+    }
+    split = _split_actions(nested_actions, 3)
+    assert len(split) == 3
+    for i in range(3):
+        assert split[i]['arm'].shape == (4,)
+        assert split[i]['gripper'][0].shape == (1,)
+        assert split[i]['gripper'][1].shape == (2,)
+
+def test_evaluate_actor_dict_action():
+    from env_ssl_wrapper import evaluate_actor
+    from env_ssl_wrapper.mocks import GymnasiumMockEnv
+
+    class DictActionEnv(GymnasiumMockEnv):
+        def step(self, action):
+            assert isinstance(action, dict) and 'a' in action and 'b' in action
+            return super().step(np.concatenate([action['a'], action['b']]))
+
+    def dict_actor(obs):
+        return {'a': torch.zeros(1, 1), 'b': torch.zeros(1, 1)}
+
+    stats = evaluate_actor(dict_actor, DictActionEnv(), episodes = 1)
+    assert stats.num_episodes == 1

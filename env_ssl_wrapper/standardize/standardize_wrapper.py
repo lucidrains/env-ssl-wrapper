@@ -14,6 +14,8 @@ from .spaces import infer_observation_space, space_from_action_spec
 # class
 
 class StandardizeWrapper(EnvWrapper):
+    priority = 0
+
     # normalizes any sim into (obs, reward, terminated, truncated, info) via its adapter
 
     def __init__(self, env, adapter = None):
