@@ -31,6 +31,11 @@ def broadcast_mask(mask, x):
 
 def zero_mask(x, mask, fill_scalar = None):
     if is_tensor(x):
+        if x.ndim == 0:
+            if not bool(to_numpy(mask).any()):
+                return x
+            return torch.tensor(fill_scalar, device = x.device, dtype = x.dtype) if exists(fill_scalar) else torch.zeros_like(x)
+
         return torch.where(broadcast_mask(mask, x), torch.zeros_like(x), x)
 
     arr = np.asarray(x)
@@ -38,6 +43,9 @@ def zero_mask(x, mask, fill_scalar = None):
     if arr.ndim == 0:
         if exists(fill_scalar) and bool(np.asarray(mask).any()):
             return fill_scalar
+        return x
+
+    if arr.dtype.kind not in 'biufc':
         return x
 
     out = arr.copy()
@@ -86,6 +94,7 @@ class EpisodePaddingWrapper(EnvWrapper):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
+        raw_obs = obs
 
         if self.is_vector:
             info = info if isinstance(info, dict) else {}
@@ -101,8 +110,9 @@ class EpisodePaddingWrapper(EnvWrapper):
 
             newly = mask if self.autoreset else mask & ~self._is_done
             self._is_done |= mask
+            done_mask = mask if self.autoreset else self._is_done
 
-            if mask.any():
+            if done_mask.any():
                 assert exists(self._last_obs), 'environment needs reset before calling step. call env.reset() first'
 
                 if newly.any():
@@ -118,11 +128,11 @@ class EpisodePaddingWrapper(EnvWrapper):
                 # while autoresetting envs already re-emit the true terminal obs (unless told to pad anyway)
 
                 if not self.autoreset or self.pad_autoreset:
-                    obs = tree_map(partial(zero_mask, mask = mask), obs)
-                    reward = zero_mask(reward, mask & ~newly, fill_scalar = 0.0)
+                    obs = tree_map(partial(zero_mask, mask = done_mask), obs)
+                    reward = zero_mask(reward, done_mask & ~newly, fill_scalar = 0.0)
 
                 info['final_observation'] = self._final_obs
-                info['_final_observation'] = back_to_mask_type(dones, mask)
+                info['_final_observation'] = back_to_mask_type(dones, done_mask)
 
-        self._last_obs = obs
+        self._last_obs = raw_obs
         return obs, reward, terminated, truncated, info

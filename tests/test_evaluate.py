@@ -270,3 +270,85 @@ class NoRenderEnv:
 
 def test_capture_frame_no_render_returns_none():
     assert capture_frame(NoRenderEnv()) is None
+
+# non-autoreset vector reset zeroes episode accumulators, so rewards emitted
+# by latched-done slots never leak into the next episode
+
+class CyclingStaggeredVecEnv:
+    num_envs = 2
+    is_vector = True
+
+    def __init__(self):
+        self.t = np.zeros(2, dtype = int)
+
+    def reset(self, seed = None, **kwargs):
+        self.t = np.zeros(2, dtype = int)
+        return np.zeros((2, 2)), {}
+
+    def step(self, action):
+        self.t += 1
+        return np.zeros((2, 2)), np.ones(2), self.t >= np.array([2, 5]), np.zeros(2, dtype = bool), {}
+
+def test_evaluate_actor_resets_returns_after_vector_reset():
+    stats = evaluate_actor(zero_actor, CyclingStaggeredVecEnv(), episodes = 4)
+
+    assert torch.allclose(stats.returns, torch.tensor([2., 5., 2., 5.]))
+    assert torch.allclose(stats.lengths, torch.tensor([2., 5., 2., 5.]))
+
+# unbatched categorical distributions collapse to their argmax, not a 0.5 threshold
+
+def test_evaluate_actor_unbatched_categorical():
+    from torch.distributions import Categorical
+
+    class DiscreteActionEnv:
+        def reset(self, **kwargs):
+            return np.zeros(2), {}
+
+        def step(self, action):
+            self.last_action = action
+            return np.zeros(2), 1.0, False, False, {}
+
+    env = DiscreteActionEnv()
+    actor = lambda obs: Categorical(logits = torch.tensor([-1.0, -1.0, 5.0]))
+
+    evaluate_actor(actor, env, episodes = 1, max_steps = 1)
+
+    assert np.asarray(env.last_action).ndim == 0
+    assert int(env.last_action) == 2
+
+# torch-native single envs receive a batched observation and unbatched torch actions
+
+class TorchNativeSingleEnv:
+    # matches the mujoco warp adapter, so actions stay torch without a numpy roundtrip
+    wp_env = True
+
+    def reset(self, **kwargs):
+        return torch.zeros(4), {}
+
+    def step(self, action):
+        self.last_action = action
+        return torch.zeros(4), torch.tensor(1.0), torch.tensor(False), torch.tensor(False), {}
+
+def test_evaluate_actor_torch_native_single_env():
+    env = TorchNativeSingleEnv()
+    stats = evaluate_actor(zero_actor, env, episodes = 1, max_steps = 2)
+
+    assert env.last_action.shape == (2,)
+    assert torch.allclose(stats.returns, torch.tensor([2.]))
+
+def test_evaluate_actor_unbatched_tensor_wrapper():
+    from env_ssl_wrapper import TensorWrapper
+
+    env = TensorWrapper(GymnasiumMockEnv())
+    stats = evaluate_actor(zero_actor, env, episodes = 1, max_steps = 3)
+
+    assert torch.allclose(stats.returns, torch.tensor([3.]))
+
+def test_evaluate_actor_multidim_bernoulli():
+    env = GymnasiumMockEnv()
+    actor = lambda obs: Bernoulli(probs = torch.tensor([[0.9, 0.1]]))
+
+    stats = evaluate_actor(actor, env, episodes = 1, max_steps = 1)
+
+    assert torch.allclose(stats.returns, torch.tensor([1.]))
+    assert np.allclose(env.last_action, np.array([1, 0]))

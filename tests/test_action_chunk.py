@@ -507,6 +507,36 @@ def test_action_chunk_snapshots_reused_rewards_vectorized(use_torch):
     assert np.allclose(info['chunk_rewards'], [[1., 1., 1.], [1., 1., 1.], [1., 1., 1.]])
 
 
+# classic 3-tuple (obs, reward, done) sims get their outputs normalized
+
+def test_action_chunk_three_tuple_env():
+    class TripleEnv(StepEnv):
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            return obs, reward, terminated or truncated
+
+    env = ActionChunkWrapper(TripleEnv(), chunk_len = 2)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.array([[0, 1]]))
+
+    assert float(reward) == 3.0
+    assert info['chunk_length'] == 2
+    assert not terminated and not truncated
+
+def test_action_chunk_dm_control_raw():
+    from env_ssl_wrapper.mocks import DMControlMockEnv
+
+    env = ActionChunkWrapper(DMControlMockEnv(), chunk_len = 2)
+    obs, info = env.reset()
+    assert obs.shape == (4,)
+    assert env.chunk_action_shape == (2, 2)
+
+    obs, reward, terminated, truncated, info = env.step(torch.zeros(1, 2, 2))
+    assert obs.shape == (4,)
+    assert float(reward) == 2.0
+    assert info['chunk_length'] == 2
+
 def test_action_chunk_all_export():
     import env_ssl_wrapper
     assert 'ActionChunkWrapper' in env_ssl_wrapper.__all__

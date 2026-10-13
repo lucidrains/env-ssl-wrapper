@@ -274,6 +274,9 @@ def train_ppo(
         elapsed_time = time.time() - start_time
     )
 
+def default(val, d):
+    return val if exists(val) else d
+
 # main
 
 def main(
@@ -285,10 +288,10 @@ def main(
     critic_mode: str | None = None,
     verbose: bool = False
 ):
-    if exists(chunk_len) and exists(critic_mode):
+    if exists(chunk_len) or exists(critic_mode):
         res = train_ppo(
-            chunk_len = chunk_len,
-            critic_mode = critic_mode,
+            chunk_len = default(chunk_len, 2),
+            critic_mode = default(critic_mode, 'single'),
             total_timesteps = steps,
             seed = seed,
             verbose = True

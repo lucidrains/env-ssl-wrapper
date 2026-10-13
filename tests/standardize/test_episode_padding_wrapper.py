@@ -391,3 +391,87 @@ def test_gymnasium_vector_autoreset_multiple_terminations():
                 break
 
     assert term_count >= 4
+
+# autoreset envs that provide no final observation fall back to the raw
+# pre-step obs — never the zero padding written into the returned obs
+
+class AutoresetNoFinalObsEnv:
+    num_envs = 1
+    is_vector = True
+    autoresets = True
+
+    def __init__(self):
+        self.t = 0
+
+    def reset(self, **kwargs):
+        self.t = 0
+        return np.zeros((1, 1)), {}
+
+    def step(self, action):
+        self.t += 1
+        return np.full((1, 1), float(self.t)), np.ones(1), np.ones(1, dtype = bool), np.zeros(1, dtype = bool), {}
+
+def test_pad_autoreset_raw_last_obs():
+    env = EpisodePaddingWrapper(AutoresetNoFinalObsEnv(), pad_autoreset = True)
+    env.reset()
+
+    finals = []
+
+    for _ in range(3):
+        _, _, _, _, info = env.step(np.zeros((1, 1)))
+        finals.append(float(info['final_observation'][0, 0]))
+
+    assert finals == [0.0, 1.0, 2.0]
+
+# time limits sit inside the episode padding wrapper, so capped episodes
+# surface as terminal transitions with a final observation attached
+
+def test_compose_env_time_limit_inside_padding():
+    class NoTermVecEnv:
+        num_envs = 2
+        is_vector = True
+
+        def reset(self, **kwargs):
+            return np.zeros((2, 1)), {}
+
+        def step(self, action):
+            return np.zeros((2, 1)), np.ones(2), np.zeros(2, dtype = bool), np.zeros(2, dtype = bool), {}
+
+    env = compose_env(NoTermVecEnv(), ('time_limit', dict(max_timesteps = 3)))
+    env.reset()
+
+    for _ in range(3):
+        obs, reward, terminated, truncated, info = env.step(np.zeros((2, 1)))
+
+    assert np.asarray(truncated).astype(bool).all()
+    assert 'final_observation' in info
+
+def test_pad_non_autoreset_pulse_termination():
+    class PulseTermVecEnv:
+        num_envs = 2
+        is_vector = True
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return np.ones((2, 2)), {}
+
+        def step(self, action):
+            self.t += 1
+            obs = np.full((2, 2), float(self.t + 1))
+            term = np.array([self.t == 1, self.t == 3])
+            return obs, np.ones(2), term, np.zeros(2, dtype = bool), {}
+
+    env = EpisodePaddingWrapper(PulseTermVecEnv())
+    env.reset()
+
+    obs1, rew1, _, _, info1 = env.step(None)
+    assert (obs1[0] == 0.0).all() and (obs1[1] == 2.0).all()
+    assert rew1[0] == 1.0 and rew1[1] == 1.0
+    assert (info1['final_observation'][0] == 1.0).all()
+
+    # step 2: env 0 emitted term=False on this step, but stays latched as done
+    obs2, rew2, _, _, info2 = env.step(None)
+    assert (obs2[0] == 0.0).all() and (obs2[1] == 3.0).all()
+    assert rew2[0] == 0.0 and rew2[1] == 1.0
+    assert (info2['final_observation'][0] == 1.0).all()
+    assert list(info2['_final_observation']) == [True, False]

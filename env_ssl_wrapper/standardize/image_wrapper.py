@@ -99,13 +99,11 @@ class ImageObservationWrapper(TransformObservationWrapper):
             normalize = self.normalize,
             normalize_divisor = self.normalize_divisor
         )
-        return processed, is_batched
+        return processed if is_batched else rearrange(processed, '1 c h w -> c h w')
 
-    def observation(self, obs):
-        img, is_batched = self.render_frame()
-
-        if not is_batched:
-            img = rearrange(img, '1 c h w -> c h w')
+    def observation(self, obs, img = None):
+        if not exists(img):
+            img = self.render_frame()
 
         if not isinstance(obs, dict):
             return dict(state = obs, **{self.image_key: img})
@@ -124,14 +122,15 @@ class ImageObservationWrapper(TransformObservationWrapper):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
-        out = self.observation(obs)
+        img = self.render_frame()
+        out = self.observation(obs, img = img)
 
         # terminal obs are augmented in place, preserving whatever the sim
         # or the padding wrapper froze as the true terminal observation
 
-        if isinstance(info, dict) and not self.autoresets:
+        if isinstance(info, dict):
             for key in FINAL_OBSERVATION_KEYS:
                 if key in info and not (isinstance(info[key], dict) and self.image_key in info[key]):
-                    info[key] = self.observation(info[key])
+                    info[key] = self.observation(info[key], img = img)
 
         return out, reward, terminated, truncated, info

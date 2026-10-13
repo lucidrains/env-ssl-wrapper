@@ -3,6 +3,7 @@ from __future__ import annotations
 from .helpers import (
     EnvWrapper,
     default,
+    env_render_mode,
     exists,
     first_existing,
     get_attr,
@@ -14,6 +15,10 @@ from .helpers import (
 from .spaces import space_from_action_spec
 
 # helpers
+
+def env_type_info(env) -> tuple[str, str]:
+    cls = type(env)
+    return cls.__name__, getattr(cls, '__module__', '')
 
 def render_with_dims(render, height, width, camera = None):
     # modern render(height, width, camera) vs legacy bare render()
@@ -89,7 +94,7 @@ class BaseEnvAdapter:
 
         render = get_attr(self.env, 'render')
 
-        if callable(render):
+        if callable(render) and exists(env_render_mode(self.env)):
             return render_with_dims(render, height, width, camera)
 
         return None
@@ -200,10 +205,12 @@ class WrapperAdapter(BaseEnvAdapter):
 # dm control adapter
 
 class DMControlAdapter(BaseEnvAdapter):
+    is_vectorized = False
+    autoresets = False
+
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         is_dm_type = 'DMControl' in name or 'dm_control' in mod or 'dm_env' in mod
         has_physics = exists(get_attr(env, 'physics')) and callable(get_attr(get_attr(env, 'physics'), 'render'))
         return is_dm_type or has_physics
@@ -213,32 +220,17 @@ class DMControlAdapter(BaseEnvAdapter):
         if exists(random_state) and callable(get_attr(random_state, 'seed')):
             random_state.seed(seed)
             return
-        if callable(get_attr(self.env, 'seed')):
-            self.env.seed(seed)
-            return
         super().seed(seed)
-
-    def render(self, height: int, width: int, camera = None):
-        physics = get_attr(self.env, 'physics')
-        if exists(physics) and callable(get_attr(physics, 'render')):
-            kwargs = dict(camera_id = camera) if exists(camera) else {}
-            return physics.render(height = height, width = width, **kwargs)
-        return super().render(height, width, camera)
-
-    @property
-    def action_space(self):
-        return default(super().action_space, space_from_action_spec(self.env))
-
-    is_vectorized = False
-    autoresets = False
 
 # pybullet adapter
 
 class PyBulletAdapter(BaseEnvAdapter):
+    is_vectorized = False
+    autoresets = False
+
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         return 'PyBullet' in name or 'pybullet' in mod or (exists(get_attr(env, 'p')) and callable(get_attr(get_attr(env, 'p'), 'getCameraImage')))
 
     def render(self, height: int, width: int, camera = None):
@@ -251,15 +243,6 @@ class PyBulletAdapter(BaseEnvAdapter):
             return self.env.render(mode = 'rgb_array')
         return None
 
-    def seed(self, seed: int):
-        if callable(get_attr(self.env, 'seed')):
-            self.env.seed(seed)
-            return
-        super().seed(seed)
-
-    is_vectorized = False
-    autoresets = False
-
 # mjlab adapter (manager-based rl envs on mujoco warp)
 
 class MjlabAdapter(BaseEnvAdapter):
@@ -268,8 +251,7 @@ class MjlabAdapter(BaseEnvAdapter):
 
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         return 'mjlab' in mod.lower() or name == 'ManagerBasedRlEnv'
 
     @property
@@ -285,8 +267,7 @@ class IsaacAdapter(BaseEnvAdapter):
 
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         isaac_kw = ('isaac', 'omni.isaac', 'isaacgym', 'isaaclab')
         return any(k in mod.lower() for k in isaac_kw) or 'Isaac' in name or exists(get_attr(env, 'sim_device')) or exists(get_attr(env, 'physics_sim_view'))
 
@@ -295,20 +276,9 @@ class IsaacAdapter(BaseEnvAdapter):
 class MujocoWarpAdapter(BaseEnvAdapter):
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         warp_kw = ('warp', 'mujoco_warp', 'brax', 'mjx')
         return any(k in mod.lower() for k in warp_kw) or 'Brax' in name or 'Mjx' in name or exists(get_attr(env, 'warp_device')) or exists(get_attr(env, 'wp_env'))
-
-    @property
-    def is_vectorized(self) -> bool:
-        if truthy_attr(get_attr(self.env, 'is_vector')):
-            return True
-        return self.num_envs > 1
-
-    @property
-    def autoresets(self) -> bool:
-        return truthy_attr(first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode'))
 
 # pufferlib adapter
 
@@ -317,13 +287,8 @@ class PufferLibAdapter(BaseEnvAdapter):
 
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         return 'Puffer' in name or 'pufferlib' in mod or exists(get_attr(env, 'puffer_env'))
-
-    @property
-    def autoresets(self) -> bool:
-        return truthy_attr(first_existing(self.env, 'autoreset', 'autoresets', 'autoreset_mode'))
 
 # robotics adapter (robosuite, maniskill, metaworld, trifinger, habitat, rlbench,
 # omnigibson, robomimic, myosuite, gymnasium-robotics, lerobot, ...)
@@ -340,39 +305,16 @@ ROBOTICS_KEYWORDS = (
 class RoboticsAdapter(BaseEnvAdapter):
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '').lower()
-        name = type(env).__name__.lower()
+        name, mod = (s.lower() for s in env_type_info(env))
         has_sim_render = exists(get_attr(env, 'sim')) and callable(get_attr(get_attr(env, 'sim'), 'render'))
         return any(k in name or k in mod for k in ROBOTICS_KEYWORDS) or has_sim_render
-
-    def render(self, height: int, width: int, camera = None):
-        frame = render_sim(get_attr(self.env, 'sim'), height, width, camera)
-
-        if exists(frame):
-            return frame
-
-        render = get_attr(self.env, 'render')
-
-        if callable(render):
-            return render_with_dims(render, height, width, camera)
-
-        return super().render(height, width, camera)
-
-    @property
-    def is_vectorized(self) -> bool:
-        if truthy_attr(get_attr(self.env, 'is_vector')):
-            return True
-        if exists(get_attr(self.env, 'single_action_space')):
-            return True
-        return self.num_envs > 1
 
 # farama gymnasium adapter
 
 class GymnasiumAdapter(BaseEnvAdapter):
     @classmethod
     def matches(cls, env):
-        mod = getattr(type(env), '__module__', '')
-        name = type(env).__name__
+        name, mod = env_type_info(env)
         if 'Gymnasium' in name or 'AutoresetVector' in name:
             return True
         try:
@@ -385,17 +327,13 @@ class GymnasiumAdapter(BaseEnvAdapter):
 
     @property
     def is_vectorized(self) -> bool:
-        if truthy_attr(get_attr(self.env, 'is_vector')):
-            return True
-        if exists(get_attr(self.env, 'single_action_space')):
+        if super().is_vectorized:
             return True
         try:
             from gymnasium.vector import VectorEnv
-            if isinstance(self.env, VectorEnv):
-                return True
+            return isinstance(self.env, VectorEnv)
         except ImportError:
-            pass
-        return self.num_envs > 1
+            return False
 
     def unwrapped_adapter(self):
         # foreign gym wrappers (TimeLimit, RecordEpisodeStatistics, ...) inherit
@@ -432,9 +370,6 @@ class GymnasiumAdapter(BaseEnvAdapter):
             return
         except Exception:
             pass
-        if callable(get_attr(self.env, 'seed')):
-            self.env.seed(seed)
-            return
         super().seed(seed)
 
 # legacy openai gym adapter
@@ -442,15 +377,8 @@ class GymnasiumAdapter(BaseEnvAdapter):
 class LegacyGymAdapter(BaseEnvAdapter):
     @classmethod
     def matches(cls, env):
-        name = type(env).__name__
-        mod = getattr(type(env), '__module__', '')
+        name, mod = env_type_info(env)
         return 'LegacyGym' in name or 'gym.' in mod or mod == 'gym'
-
-    def seed(self, seed: int):
-        if callable(get_attr(self.env, 'seed')):
-            self.env.seed(seed)
-            return
-        super().seed(seed)
 
 # default fallback adapter
 

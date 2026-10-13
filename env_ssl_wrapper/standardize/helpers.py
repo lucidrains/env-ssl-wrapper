@@ -111,7 +111,7 @@ def dones_of(terminated, truncated):
 def is_time_step(out):
     return exists(get_attr(out, 'step_type')) and exists(get_attr(out, 'observation'))
 
-def _zero_bool_leaf(x):
+def zero_bool_leaf(x):
     if is_tensor(x):
         return torch.zeros_like(x, dtype = torch.bool)
 
@@ -119,7 +119,7 @@ def _zero_bool_leaf(x):
     return np.zeros_like(arr, dtype = bool) if arr.ndim > 0 else False
 
 def zero_like(x):
-    return tree_map(_zero_bool_leaf, x)
+    return tree_map(zero_bool_leaf, x)
 
 def normalize_obs(obs):
     # raw arrays / scalars / text / containers pass through — custom observation
@@ -207,7 +207,7 @@ def normalize_step_out(out):
 
     raise ValueError(f'could not standardize step output of length {len(out)}')
 
-def _zero_leaf(x):
+def zero_leaf(x):
     if is_tensor(x):
         return torch.zeros_like(x)
     if isinstance(x, np.ndarray):
@@ -220,7 +220,9 @@ def _zero_leaf(x):
         return np.zeros_like(np.asarray(x))
     return 0
 
-def _stack_leaves(leaves):
+_zero_leaf = zero_leaf
+
+def stack_leaves(leaves):
     if all(map(is_tensor, leaves)):
         return torch.stack(leaves)
     return np.stack(leaves)
@@ -235,7 +237,7 @@ def stack_trees(trees):
         return np.stack(trees)
 
     leaves = [tree_flatten(tree)[0] for tree in trees]
-    stacked = [_stack_leaves(col) for col in zip(*leaves)]
+    stacked = [stack_leaves(col) for col in zip(*leaves)]
     return tree_unflatten(stacked, tree_structure(first))
 
 def unpack_vector_observations(arr):
@@ -252,7 +254,7 @@ def unpack_vector_observations(arr):
     if not exists(sample):
         return arr
 
-    trees = [tree_map(_zero_leaf, sample) if not exists(x) else x for x in arr]
+    trees = [tree_map(zero_leaf, sample) if not exists(x) else x for x in arr]
     return stack_trees(trees)
 
 # environment probes
@@ -301,12 +303,7 @@ def has_final_observation(info):
     return isinstance(info, dict) and any(key in info for key in FINAL_OBSERVATION_KEYS)
 
 def maybe_get_final_observation(info):
-    if isinstance(info, dict):
-        for key in FINAL_OBSERVATION_KEYS:
-            if key in info:
-                return info[key]
-
-    return None
+    return first_existing(info, *FINAL_OBSERVATION_KEYS) if isinstance(info, dict) else None
 
 def get_final_observation(info, default = None):
     final_obs = maybe_get_final_observation(info)
@@ -424,29 +421,21 @@ class TransformObservationWrapper(EnvWrapper):
         return self.transform_obs(obs, done = done) if self.takes_done else self.transform_obs(obs)
 
     def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
+        obs, info = normalize_reset_out(self.env.reset(**kwargs))
         obs = self.transform(obs, done = None)
-
-        if isinstance(info, dict):
-            for key in FINAL_OBSERVATION_KEYS:
-                if key in info:
-                    info[key] = self.transform(info[key], done = None)
-
+        maybe_transform_final_observation(info, self.transform)
         return obs, info
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         done = dones_of(terminated, truncated) if self.autoresets else None
 
         out = self.transform(obs, done = done)
 
-        if isinstance(info, dict):
-            for key in FINAL_OBSERVATION_KEYS:
-                if key in info:
-                    if not self.takes_done:
-                        info[key] = self.transform(info[key])
-                    elif not self.autoresets:
-                        info[key] = out
+        if not self.takes_done:
+            maybe_transform_final_observation(info, self.transform)
+        elif not self.autoresets:
+            maybe_transform_final_observation(info, lambda _: out)
 
         return out, reward, terminated, truncated, info
 

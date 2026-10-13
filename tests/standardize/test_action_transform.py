@@ -203,3 +203,11 @@ def test_auto_rescale_raising_action_spec_passthrough():
     wrapper.step(np.array([0.5, 0.5], dtype = np.float32))
 
     assert np.allclose(wrapper.env.last_action, np.array([0.5, 0.5]))
+
+# auto rescaling keeps the caller's numpy dtype — action-space bounds are float64
+
+def test_auto_rescale_preserves_numpy_dtype():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True)
+    env.step(np.array([0.25, 1.0], dtype = np.float32))
+
+    assert env.unwrapped.last_action.dtype == np.float32

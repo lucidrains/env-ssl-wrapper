@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import partial
 from typing import Sequence
 
 import torch
@@ -9,9 +10,12 @@ from .standardize.helpers import (
     any_true,
     cast_tuple,
     default,
+    dones_of,
     exists,
     is_array_like,
     is_scalar,
+    maybe_transform_final_observation,
+    normalize_step_out,
 )
 
 # helper functions
@@ -63,7 +67,7 @@ class MemoryTraceWrapper(TransformObservationWrapper):
         prefix = self.trace_key if key == self.obs_key else f'{key}_{self.trace_key}'
         return f'{prefix}_{lam}' if len(self.lambdas) > 1 else prefix
 
-    def transform_obs(self, obs, done = None):
+    def transform_obs(self, obs, done = None, update_state: bool = True):
         if isinstance(obs, (tuple, list)):
             out = {f'{self.obs_key}_{i}': elem for i, elem in enumerate(obs)}
         elif isinstance(obs, dict):
@@ -96,7 +100,8 @@ class MemoryTraceWrapper(TransformObservationWrapper):
             else:
                 traces = [prev.lerp(val_float, calc_lerp_weight(lam, done, val_float)) for lam, prev in zip(self.lambdas, self.traces[key])]
 
-            self.traces[key] = traces
+            if update_state:
+                self.traces[key] = traces
 
             for lam, trace in zip(self.lambdas, traces):
                 out[self.trace_key_for(key, lam)] = trace
@@ -106,3 +111,17 @@ class MemoryTraceWrapper(TransformObservationWrapper):
     def reset(self, **kwargs):
         self.traces = dict()
         return super().reset(**kwargs)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
+        done = dones_of(terminated, truncated)
+
+        # terminal observations are transformed against pre-reset traces without mutating state
+
+        maybe_transform_final_observation(
+            info,
+            partial(self.transform_obs, done = None, update_state = False)
+        )
+
+        out = self.transform_obs(obs, done = done, update_state = True)
+        return out, reward, terminated, truncated, info

@@ -198,6 +198,57 @@ def test_memory_trace_scalar_obs_done_step():
     obs, *_ = env.step(None)
     assert torch.allclose(obs['trace'], torch.tensor(2.0))
 
+# terminal observations are folded into the pre-reset trace, while the live
+# terminal output resets its trace
+
+def test_memory_trace_final_observation_uses_prereset_trace():
+    class FinalObsEnv:
+        def reset(self, **kwargs):
+            self.t = 0
+            return torch.tensor([1.0]), {}
+
+        def step(self, action):
+            self.t += 1
+
+            if self.t == 2:
+                info = {'final_observation': torch.tensor([9.0])}
+                return torch.tensor([2.0]), 1.0, torch.tensor(True), torch.tensor(False), info
+
+            return torch.tensor([float(self.t + 1)]), 1.0, torch.tensor(False), torch.tensor(False), {}
+
+    env = MemoryTraceWrapper(FinalObsEnv(), lambdas = 0.5)
+    env.reset()
+    env.step(None)
+
+    obs, _, terminated, _, info = env.step(None)
+
+    assert terminated
+    assert torch.allclose(obs['trace'], torch.tensor([2.0]))
+    assert torch.allclose(info['final_observation']['trace'], torch.tensor([5.25]))
+
+def test_memory_trace_autoreset_final_observation():
+    class AutoresetFinalObsEnv:
+        is_vector = True
+        autoresets = True
+
+        def reset(self, **kwargs):
+            return torch.tensor([[1.0], [1.0]]), {}
+
+        def step(self, action):
+            obs = torch.tensor([[0.0], [3.0]])
+            info = {'final_observation': torch.tensor([[5.0], [3.0]])}
+            return obs, torch.ones(2), torch.tensor([True, False]), torch.zeros(2, dtype = torch.bool), info
+
+    env = MemoryTraceWrapper(AutoresetFinalObsEnv(), lambdas = 0.5)
+    env.reset()
+    obs, _, _, _, info = env.step(None)
+
+    assert 'trace' in info['final_observation']
+    # pre-reset trace was 1.0; lerp with final_observation [5.0, 3.0] -> [3.0, 2.0]
+    assert torch.allclose(info['final_observation']['trace'], torch.tensor([[3.0], [2.0]]))
+    # live obs trace resets slot 0 to 0.0 and updates slot 1 to 2.0
+    assert torch.allclose(obs['trace'], torch.tensor([[0.0], [2.0]]))
+
 def test_memory_trace_all_export():
     import env_ssl_wrapper
     assert 'MemoryTraceWrapper' in env_ssl_wrapper.__all__

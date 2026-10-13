@@ -694,6 +694,19 @@ def test_compose_env_flatten_obs_and_memory_trace_order():
     assert is_tensor(obs)
     assert not isinstance(obs, dict)
 
+def test_flatten_obs_skips_string_arrays():
+    class StringArrayEnv:
+        def reset(self, **kwargs):
+            return {'vec': np.array([1.0, 2.0]), 'task': np.array(['pick', 'place'])}, {}
+
+        def step(self, action):
+            return self.reset()
+
+    env = FlattenObsWrapper(StringArrayEnv())
+    obs, _ = env.reset()
+
+    assert np.allclose(obs, [1.0, 2.0])
+
 def test_pytree_any_true_and_zero_like():
     from env_ssl_wrapper.standardize.helpers import any_true, zero_like
 
@@ -708,18 +721,20 @@ def test_pytree_any_true_and_zero_like():
     assert (zeros['agent_1'] == 0).all() and zeros['agent_1'].dtype == torch.bool
 
 def test_pytree_split_actions():
-    from env_ssl_wrapper.standardize.vector import _split_actions
+    from env_ssl_wrapper.standardize.vector import split_actions, _split_actions
 
     nested_actions = {
         'arm': np.zeros((3, 4)),
         'gripper': (np.ones((3, 1)), np.zeros((3, 2)))
     }
-    split = _split_actions(nested_actions, 3)
+    split = split_actions(nested_actions, 3)
     assert len(split) == 3
     for i in range(3):
         assert split[i]['arm'].shape == (4,)
         assert split[i]['gripper'][0].shape == (1,)
         assert split[i]['gripper'][1].shape == (2,)
+
+    assert _split_actions is split_actions
 
 def test_evaluate_actor_dict_action():
     from env_ssl_wrapper import evaluate_actor

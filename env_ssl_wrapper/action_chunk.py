@@ -7,15 +7,17 @@ from torch import is_tensor
 
 from .standardize.helpers import (
     EnvWrapper,
+    any_true,
     copy_leaf,
     default,
-    any_true,
     dones_of,
     env_takes_torch,
     first_existing,
     get_adapter,
     get_attr,
     is_vectorized,
+    normalize_reset_out,
+    normalize_step_out,
     to_numpy,
 )
 
@@ -72,7 +74,7 @@ class ActionChunkWrapper(EnvWrapper):
 
         # vectorized gym envs expose a batched action space - the single env space defines the chunk layout
 
-        action_space = first_existing(env, 'single_action_space', 'action_space')
+        action_space = default(first_existing(env, 'single_action_space', 'action_space'), get_adapter(env).action_space)
         self.action_shape = tuple(get_attr(action_space, 'shape', ()) or ())
 
         self.expects_batch = is_vectorized(env)
@@ -83,7 +85,7 @@ class ActionChunkWrapper(EnvWrapper):
         return (self.chunk_len, *self.action_shape)
 
     def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+        return normalize_reset_out(self.env.reset(**kwargs))
 
     def step(self, actions):
         if isinstance(actions, dict):
@@ -114,7 +116,7 @@ class ActionChunkWrapper(EnvWrapper):
             if not self.expects_batch:
                 action = unbatch_step(action)
 
-            out = self.env.step(action)
+            out = normalize_step_out(self.env.step(action))
             rewards.append(copy_leaf(out[1]))
 
             if any_true(dones_of(out[2], out[3])):

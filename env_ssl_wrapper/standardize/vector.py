@@ -7,6 +7,7 @@ from torch.utils._pytree import tree_flatten, tree_map, tree_unflatten
 
 from .helpers import (
     any_true,
+    default,
     dones_of,
     exists,
     get_adapter,
@@ -16,14 +17,14 @@ from .helpers import (
     stack_trees,
     to_numpy,
     truthy_attr,
-    _zero_leaf,
+    zero_leaf,
 )
 from .spaces import action_dim_of, action_space_is_discrete, obs_dim_of
 from .standardize_wrapper import StandardizeWrapper
 
 # leaf helpers
 
-def _merge_infos(infos):
+def merge_infos(infos):
     infos = [info if isinstance(info, dict) else {} for info in infos]
 
     if not infos:
@@ -48,10 +49,10 @@ def _merge_infos(infos):
 class WorkerError(RuntimeError):
     pass
 
-def _exec(env, cmd, payload):
+def exec_worker_cmd(env, cmd, payload):
     if cmd == 'step':
-        if is_tensor(payload) and not get_adapter(env).torch_native:
-            payload = to_numpy(payload)
+        if not get_adapter(env).torch_native:
+            payload = tree_map(lambda a: to_numpy(a) if is_tensor(a) else a, payload)
 
         if action_space_is_discrete(env.action_space):
             if hasattr(payload, 'item') and (not hasattr(payload, 'ndim') or payload.ndim <= 1):
@@ -89,7 +90,7 @@ def _exec(env, cmd, payload):
         safe_close(env)
         return None
 
-def _worker_main(conn, env_factory):
+def worker_main(conn, env_factory):
     try:
         env = StandardizeWrapper(instantiate_env(env_factory))
     except Exception as e:
@@ -105,7 +106,7 @@ def _worker_main(conn, env_factory):
             return
 
         try:
-            result = _exec(env, cmd, payload)
+            result = exec_worker_cmd(env, cmd, payload)
         except Exception as e:
             result = WorkerError(str(e))
 
@@ -116,13 +117,13 @@ def _worker_main(conn, env_factory):
 
 # pipe helpers
 
-class _InlineConn:
+class InlineConn:
     def __init__(self, env):
         self.env = env
 
     def send(self, msg):
         try:
-            self._result = _exec(self.env, *msg)
+            self._result = exec_worker_cmd(self.env, *msg)
         except Exception as e:
             self._result = WorkerError(str(e))
 
@@ -132,15 +133,15 @@ class _InlineConn:
     def close(self):
         pass
 
-def _safe_send(conn, msg):
-    """Send that swallows broken-pipe — for broadcast patterns where _recv_all reports the error."""
+def safe_send(conn, msg):
+    # swallows broken-pipe for broadcast patterns where recv_all reports the error
     try:
         conn.send(msg)
     except (EOFError, BrokenPipeError):
         pass
 
-def _send_recv(conn):
-    """Single-channel send+recv — raises immediately on dead worker."""
+def send_recv(conn):
+    # single-channel send + recv — raises immediately on dead worker
     try:
         result = conn.recv()
     except (EOFError, BrokenPipeError) as e:
@@ -151,8 +152,8 @@ def _send_recv(conn):
 
     return result
 
-def _recv_all(conns):
-    """Drain all channels, collecting the first error — never abandons undrained pipes."""
+def recv_all(conns):
+    # drain all channels, collecting the first error — never abandons undrained pipes
     results = []
     error = None
 
@@ -172,7 +173,7 @@ def _recv_all(conns):
 
     return results
 
-def _shutdown(conns, procs):
+def shutdown(conns, procs):
     for conn in conns:
         try:
             conn.send(('close', None))
@@ -192,7 +193,7 @@ def _shutdown(conns, procs):
         except Exception:
             pass
 
-def _split_actions(actions, num_envs):
+def split_actions(actions, num_envs):
     if isinstance(actions, list) and len(actions) == num_envs:
         return actions
 
@@ -201,6 +202,9 @@ def _split_actions(actions, num_envs):
         f'expected {num_envs} actions, but got {len(leaves[0]) if leaves else 0}'
     )
     return [tree_unflatten([leaf[i] for leaf in leaves], spec) for i in range(num_envs)]
+
+_split_actions = split_actions
+_merge_infos = merge_infos
 
 # class
 
@@ -217,15 +221,15 @@ class MultiprocessingVecEnv:
         self.num_envs = num_envs
 
         if num_envs == 1:
-            self._conns = [_InlineConn(StandardizeWrapper(instantiate_env(env_factory)))]
+            self._conns = [InlineConn(StandardizeWrapper(instantiate_env(env_factory)))]
             self._procs = []
         else:
             self._conns, self._procs = self._start_processes(env_factory, num_envs)
 
         self.action_space = self._get_attr('action_space')
         self.observation_space = self._get_attr('observation_space')
-        self.action_dim = action_dim_of(self)
-        self.obs_dim = obs_dim_of(self)
+        self.action_dim = default(action_dim_of(self), self._get_attr('action_dim'))
+        self.obs_dim = default(obs_dim_of(self), self._get_attr('obs_dim'))
 
         self.seed(seed)
 
@@ -236,16 +240,16 @@ class MultiprocessingVecEnv:
 
         for _ in range(num_envs):
             parent, child = ctx.Pipe()
-            proc = ctx.Process(target = _worker_main, args = (child, env_factory), daemon = True)
+            proc = ctx.Process(target = worker_main, args = (child, env_factory), daemon = True)
             proc.start()
             child.close()
             conns.append(parent)
             procs.append(proc)
 
         try:
-            _recv_all(conns)
+            recv_all(conns)
         except WorkerError as e:
-            _shutdown(conns, procs)
+            shutdown(conns, procs)
             raise RuntimeError(str(e))
 
         return conns, procs
@@ -267,37 +271,40 @@ class MultiprocessingVecEnv:
     def _get_attr(self, name):
         conn = self._conns[0]
         conn.send(('get_attr', name))
-        return _send_recv(conn)
+        return send_recv(conn)
 
     def seed(self, seed: int | None):
         if not exists(seed):
             return
 
         for conn, env_seed in zip(self._conns, range(seed, seed + self.num_envs)):
-            _safe_send(conn, ('seed', env_seed))
+            safe_send(conn, ('seed', env_seed))
 
-        _recv_all(self._conns)
+        recv_all(self._conns)
 
     def reset(self, seed = None, **kwargs):
         for i, conn in enumerate(self._conns):
             worker_kwargs = dict(kwargs)
             if exists(seed):
                 worker_kwargs['seed'] = seed + i
-            _safe_send(conn, ('reset', worker_kwargs))
+            safe_send(conn, ('reset', worker_kwargs))
 
-        results = _recv_all(self._conns)
-        return stack_trees([obs for obs, _ in results]), _merge_infos([info for _, info in results])
+        results = recv_all(self._conns)
+
+        if not exists(self.observation_space):
+            self.observation_space = self._get_attr('observation_space')
+            self.obs_dim = default(self.obs_dim, obs_dim_of(self))
+
+        return stack_trees([obs for obs, _ in results]), merge_infos([info for _, info in results])
 
     def step(self, actions):
-        if is_tensor(actions):
-            actions = to_numpy(actions)
-
-        actions = _split_actions(actions, self.num_envs)
+        actions = tree_map(lambda a: to_numpy(a) if is_tensor(a) else a, actions)
+        actions = split_actions(actions, self.num_envs)
 
         for conn, action in zip(self._conns, actions):
-            _safe_send(conn, ('step', action))
+            safe_send(conn, ('step', action))
 
-        results = _recv_all(self._conns)
+        results = recv_all(self._conns)
 
         obs = [result[0] for result in results]
         reward = np.asarray([result[1] for result in results])
@@ -306,12 +313,12 @@ class MultiprocessingVecEnv:
         infos = [result[4] for result in results]
         final_obs = [result[5] for result in results]
 
-        info = _merge_infos(infos)
+        info = merge_infos(infos)
         done = terminated | truncated
 
         if done.any():
             final_obs = [
-                final if exists(final) else tree_map(_zero_leaf, obs_i)
+                final if exists(final) else tree_map(zero_leaf, obs_i)
                 for final, obs_i in zip(final_obs, obs)
             ]
 
@@ -321,4 +328,4 @@ class MultiprocessingVecEnv:
         return stack_trees(obs), reward, terminated, truncated, info
 
     def close(self):
-        _shutdown(self._conns, self._procs)
+        shutdown(self._conns, self._procs)

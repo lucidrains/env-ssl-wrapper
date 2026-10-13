@@ -7,16 +7,17 @@ import torch
 from torch.utils._pytree import tree_flatten, tree_map, tree_structure, tree_unflatten
 
 from .helpers import (
-    FINAL_OBSERVATION_KEYS,
     EnvWrapper,
     default,
     exists,
     first_existing,
+    get_adapter,
     get_attr,
     is_array,
     is_scalar,
     is_tensor,
     is_vectorized,
+    maybe_transform_final_observation,
 )
 
 # helper functions
@@ -56,7 +57,6 @@ def get_action_space(env):
     if exists(unit_space):
         return unit_space, True
 
-    from .helpers import get_adapter
     return get_adapter(env).action_space, False
 
 def action_shape_tree(space):
@@ -179,10 +179,7 @@ class AutoBatchedWrapper(EnvWrapper):
             return obs, info
 
         obs = maybe_expand_dim(obs)
-        if isinstance(info, dict):
-            for key in FINAL_OBSERVATION_KEYS:
-                if key in info:
-                    info[key] = maybe_expand_dim(info[key])
+        maybe_transform_final_observation(info, maybe_expand_dim)
 
         return obs, info
 
@@ -195,10 +192,6 @@ class AutoBatchedWrapper(EnvWrapper):
 
         obs, reward, terminated, truncated, info = out
         obs, reward, terminated, truncated = (maybe_expand_dim(t) for t in (obs, reward, terminated, truncated))
-
-        if isinstance(info, dict):
-            for key in FINAL_OBSERVATION_KEYS:
-                if key in info:
-                    info[key] = maybe_expand_dim(info[key])
+        maybe_transform_final_observation(info, maybe_expand_dim)
 
         return obs, reward, terminated, truncated, info

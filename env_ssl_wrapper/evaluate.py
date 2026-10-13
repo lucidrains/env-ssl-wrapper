@@ -6,12 +6,11 @@ from typing import NamedTuple
 import numpy as np
 import torch
 from torch import nn, is_tensor
-from torch.distributions import Categorical, Distribution
-from torch.utils._pytree import tree_flatten, tree_map
+from torch.distributions import Bernoulli, Categorical, Distribution
+from torch.utils._pytree import tree_map
 
 from .standardize.spaces import action_space_is_discrete
 from .standardize.helpers import (
-    EnvWrapper,
     dones_of,
     env_autoresets,
     env_num_envs,
@@ -97,6 +96,12 @@ def to_action(env, out, deterministic = True):
             if not deterministic:
                 return val.sample()
 
+            if isinstance(val, Bernoulli):
+                return (val.probs > 0.5).long()
+
+            if isinstance(val, Categorical):
+                return val.probs.argmax(dim = -1)
+
             probs = get_attr(val, 'probs')
 
             # categorical-style probs carry a trailing action axis to argmax over
@@ -171,24 +176,26 @@ def to_env_action(env, action):
     if not env_takes_torch(env):
         action = tree_map(to_numpy, action)
 
-        # single raw sims get the leading batch dim stripped, while discrete
-        # actions additionally collapse to scalars
+    # single non-vectorized envs get the leading batch dim stripped, while discrete
+    # actions additionally collapse to scalars
 
-        if not is_vectorized(env) and not exists(chunk_shape):
-            def strip_leaf(a):
-                if a.ndim > 1 and a.shape[0] == 1:
+    if not is_vectorized(env) and not exists(chunk_shape):
+        is_discrete = action_space_is_discrete(get_adapter(env).action_space)
+
+        def strip_leaf(a):
+            if a.ndim > 1 and a.shape[0] == 1:
+                a = a[0]
+
+            if is_discrete:
+                if a.ndim > 0 and a.shape[0] == 1:
                     a = a[0]
 
-                if action_space_is_discrete(get_adapter(env).action_space):
-                    if a.ndim > 0 and a.shape[0] == 1:
-                        a = a[0]
+                if a.ndim == 0:
+                    a = a.item()
 
-                    if a.ndim == 0:
-                        a = a.item()
+            return a
 
-                return a
-
-            action = tree_map(strip_leaf, action)
+        action = tree_map(strip_leaf, action)
 
     return action
 
@@ -292,7 +299,7 @@ def evaluate_actor(
     assert not (record and num_envs > 1), 'video recording requires a single env'
 
     obs, info = safe_reset(env, seed)
-    batched = is_vectorized(env) or all(map(is_tensor, tree_flatten(obs)[0]))
+    batched = is_vectorized(env)
 
     goal = goal.expand(num_envs, -1) if exists(goal) and goal.shape[0] == 1 and num_envs > 1 else goal
 
@@ -326,10 +333,12 @@ def evaluate_actor(
             if reward.numel() > num_envs:
                 reward = reward.reshape(num_envs, -1).sum(dim = -1)
 
-            returns += reward if reward.numel() == num_envs else reward.expand(num_envs)
+            reward = reward if reward.numel() == num_envs else reward.expand(num_envs)
+            active_t = torch.from_numpy(active)
 
-            lengths += info.get('chunk_length', 1) if isinstance(info, dict) else 1
-            steps += 1
+            returns += torch.where(active_t, reward, 0.)
+            lengths += torch.where(active_t, float(info.get('chunk_length', 1) if isinstance(info, dict) else 1), 0.)
+            steps += torch.where(active_t, 1, 0)
 
             done = to_numpy(dones_of(terminated, truncated)).astype(bool).reshape(-1)
 
@@ -367,15 +376,18 @@ def evaluate_actor(
                 steps[i] = 0
                 active[i] = False
 
-            if done.any() and len(done_returns) < episodes:
+            if (done.any() or not active.any()) and len(done_returns) < episodes:
                 if record:
                     frames = []
 
                 # autoresetting envs reset themselves, everything else resets here
 
-                if not env_autoresets(env) and (num_envs == 1 or done.all() or bool(get_attr(env, 'needs_reset', False))):
+                if not env_autoresets(env) and (num_envs == 1 or not active.any() or done.all() or bool(get_attr(env, 'needs_reset', False))):
                     reset_seed = seed + len(done_returns) if exists(seed) and num_envs == 1 else None
                     obs, info = safe_reset(env, reset_seed)
+                    returns.zero_()
+                    lengths.zero_()
+                    steps.zero_()
                     active[:] = True
                 elif env_autoresets(env):
                     active[newly_done] = True

@@ -491,3 +491,23 @@ def test_zero_leaf_jax_array():
     stacked = stack_trees([arr, zero])
     assert stacked.shape == (2, 2, 3)
     assert np.allclose(stacked[0], 1.0) and np.allclose(stacked[1], 0.0)
+
+def test_multiprocessing_vec_env_dict_tensor_action():
+    with MultiprocessingVecEnv(DictActionMockEnv, num_envs = 2) as env:
+        env.reset()
+        action = dict(
+            steer = torch.zeros((2, 1)),
+            throttle = torch.zeros((2, 1))
+        )
+        obs, reward, terminated, truncated, info = env.step(action)
+        assert obs.shape == (2, 4)
+
+def test_standardize_env_wrapper_vector_factory():
+    from env_ssl_wrapper import StandardizeEnvWrapper
+
+    env = StandardizeEnvWrapper(lambda: AutoresetVectorMockEnv())
+    obs, _ = env.reset()
+    assert obs.shape == (4, 4)
+    obs, reward, terminated, truncated, _ = env.step(torch.zeros(4, 2))
+    assert obs.shape == (4, 4)
+    assert reward.shape == (4,)

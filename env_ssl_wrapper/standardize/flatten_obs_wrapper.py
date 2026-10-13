@@ -16,7 +16,7 @@ from .helpers import (
 # helpers
 
 def flattenable(t):
-    if is_array(t) or is_scalar(t):
+    if is_tensor(t) or is_scalar(t):
         return True
 
     try:

@@ -9,7 +9,7 @@ from .helpers import (
     instantiate_env,
     mark_terminal_obs,
 )
-from .spaces import infer_observation_space, space_from_action_spec
+from .spaces import infer_observation_space
 
 # class
 
@@ -26,10 +26,7 @@ class StandardizeWrapper(EnvWrapper):
 
         # always expose single-env spaces
 
-        self.action_space = default(
-            self.adapter.action_space,
-            space_from_action_spec(env)
-        )
+        self.action_space = self.adapter.action_space
         self.observation_space = self.adapter.observation_space
 
     def reset(self, **kwargs):
@@ -41,7 +38,7 @@ class StandardizeWrapper(EnvWrapper):
             self.observation_space = infer_observation_space(obs, self.is_vector)
 
         if not exists(self.action_space):
-            self.action_space = default(self.adapter.action_space, space_from_action_spec(self.env))
+            self.action_space = self.adapter.action_space
 
         return obs, info
 

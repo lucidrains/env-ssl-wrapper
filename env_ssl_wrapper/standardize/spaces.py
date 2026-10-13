@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from torch.utils._pytree import tree_map
 
-from .helpers import default, exists, get_attr, to_numpy
+from .helpers import default, exists, get_adapter, get_attr, to_numpy
 
 # stand-in for environments that do not expose gymnasium spaces
 
@@ -102,16 +102,9 @@ def action_space_bounds(space):
     return space.low, space.high
 
 def action_dim_of(env) -> int | None:
-    from .helpers import get_adapter
     space = get_adapter(env).action_space
-    dim = action_space_dim(space)
-
-    if exists(dim):
-        return dim
-
-    return get_attr(env, 'action_dim')
+    return default(action_space_dim(space), get_attr(env, 'action_dim'))
 
 def obs_dim_of(env) -> int | None:
-    from .helpers import get_adapter
     space = get_adapter(env).observation_space
     return default(space_dim(space), get_attr(env, 'obs_dim'))

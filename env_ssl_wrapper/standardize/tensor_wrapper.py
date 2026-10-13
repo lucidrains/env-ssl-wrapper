@@ -9,12 +9,12 @@ from torch.utils._pytree import tree_map
 
 from .helpers import (
     EnvWrapper,
-    FINAL_OBSERVATION_KEYS,
     FINAL_OBSERVATION_MASK_KEYS,
     exists,
     get_adapter,
     is_foreign_array,
     is_scalar,
+    maybe_transform_final_observation,
     unpack_vector_observations,
 )
 
@@ -112,9 +112,7 @@ class TensorWrapper(EnvWrapper):
         if not isinstance(info, dict) or not info:
             return
 
-        for key in FINAL_OBSERVATION_KEYS:
-            if key in info:
-                info[key] = self.cast(info[key])
+        maybe_transform_final_observation(info, self.cast)
 
         for key in FINAL_OBSERVATION_MASK_KEYS:
             if key in info:

@@ -6,8 +6,7 @@ from torch import is_tensor
 from torch.utils._pytree import tree_map
 from functools import partial
 
-from .helpers import EnvWrapper, copy_leaf, default, exists, first_existing, get_attr
-from .spaces import space_from_action_spec
+from .helpers import EnvWrapper, copy_leaf, default, exists, first_existing, get_adapter, get_attr
 
 # helpers
 
@@ -22,7 +21,7 @@ def clamp(t, min_val, max_val):
     if is_tensor(t):
         return torch.clamp(t, min_val, max_val)
     if isinstance(t, np.ndarray):
-        return np.clip(t, min_val, max_val)
+        return np.clip(t, min_val, max_val).astype(t.dtype, copy = False)
     return max(min_val, min(t, max_val))
 
 def rescale(
@@ -32,27 +31,19 @@ def rescale(
 ):
     from_min, from_max = from_range
     to_min, to_max = to_range
-    return (t - from_min) / (from_max - from_min) * (to_max - to_min) + to_min
+    out = (t - from_min) / (from_max - from_min) * (to_max - to_min) + to_min
+    return out.astype(t.dtype, copy = False) if isinstance(t, np.ndarray) else out
 
 def action_bounds(env):
     # canonical per-env bounds — gymnasium spaces, or dm_control action_spec.
     # discrete spaces have nothing to rescale
 
-    space = first_existing(env, 'single_action_space', 'action_space')
+    space = default(first_existing(env, 'single_action_space', 'action_space'), get_adapter(env).action_space)
 
-    if exists(space):
-        if exists(get_attr(space, 'n')):
-            return None
-
-        if exists(get_attr(space, 'low')):
-            return np.asarray(space.low, dtype = float), np.asarray(space.high, dtype = float)
-
-    spec = space_from_action_spec(env)
-
-    if not exists(spec):
+    if not exists(space) or exists(get_attr(space, 'n')) or not exists(get_attr(space, 'low')):
         return None
 
-    return np.asarray(spec.low, dtype = float), np.asarray(spec.high, dtype = float)
+    return np.asarray(space.low, dtype = float), np.asarray(space.high, dtype = float)
 
 # wrapper
 
@@ -80,7 +71,12 @@ class ActionTransformWrapper(EnvWrapper):
         self.bounds = action_bounds(env) if auto else None
 
     def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+        out = self.env.reset(**kwargs)
+
+        if self.auto and not exists(self.bounds):
+            self.bounds = action_bounds(self.env)
+
+        return out
 
     def auto_transform(self, t):
         # rescale canonical range (default (0, 1), beta-friendly) to per-env
@@ -90,6 +86,7 @@ class ActionTransformWrapper(EnvWrapper):
             return t
 
         low, high = self.bounds
+        orig_dtype = t.dtype if isinstance(t, np.ndarray) else None
 
         # scalar (0-dim) actions — e.g. Box(shape = (), ...) — reshape out and back
 
@@ -125,6 +122,8 @@ class ActionTransformWrapper(EnvWrapper):
             rescaled = torch.where(valid_t, torch.clamp(rescaled, low, high), t)
         else:
             rescaled = np.where(valid_t, np.clip(rescaled, low, high), t)
+            if exists(orig_dtype):
+                rescaled = rescaled.astype(orig_dtype, copy = False)
 
         if was_scalar:
             rescaled = rescaled[0]

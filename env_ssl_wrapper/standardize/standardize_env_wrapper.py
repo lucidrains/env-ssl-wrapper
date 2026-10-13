@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from .helpers import EnvWrapper, exists, is_vectorized
+from .helpers import EnvWrapper, exists, instantiate_env, is_vectorized
 from .utils import compose_env
 
 class StandardizeEnvWrapper(EnvWrapper):
@@ -27,6 +27,7 @@ class StandardizeEnvWrapper(EnvWrapper):
         chunk_gamma: float = 1.,
         chunk_reward_mode: str = 'sum',
     ):
+        env = instantiate_env(env)
         wrappers = []
 
         if exists(image_size):

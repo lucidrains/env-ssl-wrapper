@@ -33,7 +33,7 @@ def back_to_like(t, numpy_arr):
     return numpy_arr
 
 class TimeLimitWrapper(EnvWrapper):
-    priority = 40
+    priority = 5
 
     """
     caps episode length at max_timesteps, setting truncated = True for
