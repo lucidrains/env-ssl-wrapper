@@ -26,6 +26,8 @@ class StandardizeEnvWrapper(EnvWrapper):
         chunk_len: int | None = None,
         chunk_gamma: float = 1.,
         chunk_reward_mode: str = 'sum',
+        reset_configs = None,
+        sgs_kwargs: dict | None = None,
     ):
         env = instantiate_env(env)
         wrappers = []
@@ -57,6 +59,9 @@ class StandardizeEnvWrapper(EnvWrapper):
 
         if flatten_obs:
             wrappers.append('flatten_obs')
+
+        if exists(reset_configs):
+            wrappers.append(('sgs', dict(reset_configs = reset_configs, **(sgs_kwargs or {}))))
 
         wrapped = compose_env(env, *wrappers, pad_episodes = pad_episodes)
 

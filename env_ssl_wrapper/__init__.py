@@ -7,6 +7,14 @@ from .standardize import *  # noqa: F403
 
 from .memory_trace import MemoryTraceWrapper
 from .action_chunk import ActionChunkWrapper
+from .sgs import (
+    SuccessGuidedSamplingWrapper,
+    SGSWrapper,
+    SGSSampler,
+    sgs_score_fn,
+    variance_score_fn,
+    uniform_score_fn,
+)
 from .evaluate import evaluate_actor, EpisodeStats
 
 # backwards compatibility — the standardize wrappers used to live at the top
@@ -38,6 +46,12 @@ __all__ = [
     *standardize.__all__,
     'MemoryTraceWrapper',
     'ActionChunkWrapper',
+    'SuccessGuidedSamplingWrapper',
+    'SGSWrapper',
+    'SGSSampler',
+    'sgs_score_fn',
+    'variance_score_fn',
+    'uniform_score_fn',
     'evaluate_actor',
     'EpisodeStats',
 ]

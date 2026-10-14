@@ -282,11 +282,29 @@ class MultiprocessingVecEnv:
 
         recv_all(self._conns)
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        worker_kwargs = dict(kwargs)
+        if exists(seed):
+            worker_kwargs['seed'] = seed
+        safe_send(self._conns[index], ('reset', worker_kwargs))
+        return send_recv(self._conns[index])
+
     def reset(self, seed = None, **kwargs):
+        options = kwargs.get('options')
+
         for i, conn in enumerate(self._conns):
             worker_kwargs = dict(kwargs)
             if exists(seed):
                 worker_kwargs['seed'] = seed + i
+
+            if isinstance(options, (list, tuple)) and len(options) == self.num_envs:
+                worker_kwargs['options'] = options[i]
+            elif isinstance(options, dict):
+                worker_kwargs['options'] = {
+                    k: (v[i] if isinstance(v, (list, tuple)) and len(v) == self.num_envs else v)
+                    for k, v in options.items()
+                }
+
             safe_send(conn, ('reset', worker_kwargs))
 
         results = recv_all(self._conns)

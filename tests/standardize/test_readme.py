@@ -211,3 +211,21 @@ def test_readme_action_chunk_snippet():
             obs, info = env.reset()
 
         step_count += 1
+
+def test_readme_sgs_snippet():
+    from env_ssl_wrapper import StandardizeEnvWrapper, SuccessGuidedSamplingWrapper
+
+    reset_states = [torch.zeros(4), torch.ones(4)]
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    env = SuccessGuidedSamplingWrapper(
+        env,
+        reset_configs = reset_states,
+        target = 0.5,
+        kappa = 2.,
+        window = 20
+    )
+
+    obs, info = env.reset()
+    assert obs.shape == (1, 4)
+    assert 'sgs_config_id' in info
+

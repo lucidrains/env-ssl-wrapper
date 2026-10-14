@@ -120,6 +120,26 @@ uv run test_action_chunk.py --sweep=True                 # PPO over several chun
 uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts match per-step reference
 ```
 
+### Success-Guided Sampling
+
+Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `target` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2603.15999))
+
+```python
+import gymnasium as gym
+import torch
+from env_ssl_wrapper import StandardizeEnvWrapper, SuccessGuidedSamplingWrapper
+
+reset_states = [torch.zeros(4), torch.ones(4)]  # bank of reset states to sample over
+
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+env = SuccessGuidedSamplingWrapper(env, reset_configs = reset_states, target = 0.5, kappa = 2.)
+
+obs, info = env.reset()
+# info['sgs_config_id'] -> the config this episode started from (success rates update on episode end)
+```
+
+`reset_configs` holds reset states — or callables drawing one (`lambda rng: ...`) — passed through `options`, or built by a `reset_options_fn` / `state_transform`. Every stage of the sampling loop is hookable: score equation (`score_fn`), target schedule, uniform floor (`uniform_prob`), env-native fallback (`default_prob`), success signal (`success_fn`).
+
 ## Wrappers
 
 Pass wrappers as strings (default config) or `(name, dict)` tuples (custom config), in any order.
@@ -135,6 +155,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `tensor` | NumPy → torch on a device, torch actions → numpy for the sim. |
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
+| `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(reset_configs = configs, target = 0.5, kappa = 2.))` |
 
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.
 
@@ -250,5 +271,14 @@ uv run pytest
     author  = {Onno Eberhard and Michael Muehlebach and Claire Vernade},
     journal = {arXiv preprint arXiv:2503.15200},
     year    = {2025}
+}
+```
+
+```bibtex
+@article{zhang2026omnireset,
+    title   = {OmniReset: Solving Dexterous Manipulation from Sparse Rewards via Reset States},
+    author  = {Octi Zhang and others},
+    journal = {arXiv preprint arXiv:2603.15999},
+    year    = {2026}
 }
 ```
