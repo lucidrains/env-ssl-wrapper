@@ -14,6 +14,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else (d() if callable(d) else d)
 
+def divisible_by(num, den):
+    return (num % den) == 0
+
 def cast_tuple(val, length = 1):
     if isinstance(val, tuple):
         return val

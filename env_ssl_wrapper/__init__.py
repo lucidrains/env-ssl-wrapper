@@ -12,6 +12,7 @@ from .sgs import (
     SGSWrapper,
     SGSSampler,
     sgs_score_fn,
+    sgs_sample_fn,
     variance_score_fn,
     uniform_score_fn,
 )
@@ -50,6 +51,7 @@ __all__ = [
     'SGSWrapper',
     'SGSSampler',
     'sgs_score_fn',
+    'sgs_sample_fn',
     'variance_score_fn',
     'uniform_score_fn',
     'evaluate_actor',

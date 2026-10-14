@@ -122,7 +122,7 @@ uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts matc
 
 ### Success-Guided Sampling
 
-Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `target` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2603.15999))
+Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `target` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2610.12465))
 
 ```python
 import gymnasium as gym
@@ -138,7 +138,32 @@ obs, info = env.reset()
 # info['sgs_config_id'] -> the config this episode started from (success rates update on episode end)
 ```
 
-`reset_configs` holds reset states — or callables drawing one (`lambda rng: ...`) — passed through `options`, or built by a `reset_options_fn` / `state_transform`. Every stage of the sampling loop is hookable: score equation (`score_fn`), target schedule, uniform floor (`uniform_prob`), env-native fallback (`default_prob`), success signal (`success_fn`).
+`reset_configs` holds reset states — or callables drawing one (`lambda rng: ...`) — passed through `options`, or built by a `reset_options_fn` / `state_transform`.
+
+The score equation is swappable: the default beta shaped kernel around `target` (`sgs_score_fn`) is simply one rule of the bank's state. Whatever you pass as `score_fn` is handed, by name, the arguments it declares — `p` (per state success rates), `counts`, `history` (the raw episode outcomes), `step`, `window`, and the hparams `target`, `kappa`, `eps`, `unvisited_weight`.
+
+The sampling distribution is swappable too: the default follows the paper's Eq. (2) — the beta shape the score produces is floored at `eps`, logits are formed and softmaxed at `temperature` (floored at 1; the paper uses 2.) — and `sgs_sample_fn` draws i.i.d. from those `probs`. A custom `sample_fn` is handed, by name, whatever it declares — `p`, `counts`, `history`, `configs`, `weights` (the raw kernel), `probs` (floored and tempered), `rng`, `size`, `step`, `temperature`, and the hparams — so any distribution of the bank can be plugged in.
+
+The rest of the loop is hookable as well: target and temperature schedules, uniform floor (`uniform_prob`), env-native fallback (`default_prob`), success signal (`success_fn`).
+
+Track the curriculum as it runs — one snapshot of the bank per credited episode, kept in memory and appended to a csv when `log_path` is set:
+
+```python
+env = SuccessGuidedSamplingWrapper(
+    StandardizeEnvWrapper(gym.make('CartPole-v1')),
+    reset_configs = reset_states,
+    log_every = 1,                  # snapshot every episode (None turns logging off)
+    log_path = 'sgs_progression.csv',
+)
+
+env.trace                           # [dict(step, success_rates, probs), ...]
+```
+
+LunarLander is the worked example — a difficulty ladder of reset states, three arms (native spawns, uniform bank resets, SGS), paired evaluation and the speedup chart:
+
+```bash
+uv run train_lunar_sgs.py --steps=200000 --seeds=0,1,2,3,4   # writes experiments/lunar_sgs/
+```
 
 ## Wrappers
 
@@ -275,10 +300,10 @@ uv run pytest
 ```
 
 ```bibtex
-@article{zhang2026omnireset,
-    title   = {OmniReset: Solving Dexterous Manipulation from Sparse Rewards via Reset States},
-    author  = {Octi Zhang and others},
-    journal = {arXiv preprint arXiv:2603.15999},
+@article{zhang2026balanced,
+    title   = {A Balanced Data Diet: Addressing the Exploration Bottleneck in Mega-Scale RL for Robot Control},
+    author  = {Octi Zhang and Mateo Guaman Castro and Patrick Yin and Ignacio Dagnino and Abhishek Gupta and Rosario Scalise and Byron Boots},
+    journal = {arXiv preprint arXiv:2610.12465},
     year    = {2026}
 }
 ```

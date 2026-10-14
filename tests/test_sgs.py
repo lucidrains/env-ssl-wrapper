@@ -12,6 +12,7 @@ from env_ssl_wrapper import (
     StandardizeEnvWrapper,
     SuccessGuidedSamplingWrapper,
     compose_env,
+    sgs_sample_fn,
     sgs_score_fn,
     uniform_score_fn,
     variance_score_fn,
@@ -111,6 +112,25 @@ def test_sgs_sampler_uniform_prob():
     # with uniform_prob = 0.2, each config has at least 0.2 / 2 = 0.1 probability
     assert (probs >= 0.1 - 1e-6).all()
     assert abs(float(probs.sum()) - 1.0) < 1e-6
+
+def test_sgs_sampler_applies_the_eps_floor_and_temperature():
+    # the paper's Eq. (2) - kernels floored at eps, logits formed, softmaxed at T (floored at 1)
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    sampler = SGSSampler(configs, target = 0.5, kappa = 4., eps = 0.1, temperature = 2., seed = 0)
+
+    sampler.update([0, 1, 2], [1., 0.5, 0.])  # mastered, frontier, hopeless
+    weights = sampler.weights
+
+    assert float(weights.min()) < 0.1  # the mastered and hopeless kernels sit under the floor
+
+    floored = weights.clamp(min = 0.1) + 0.1
+    tempered = floored ** (1. / 2.)
+    assert torch.allclose(sampler.probs, tempered / tempered.sum(), atol = 1e-6)
+
+    # the temperature itself is floored at one, so a lower setting behaves the same
+    cool = SGSSampler(configs, target = 0.5, kappa = 4., eps = 0.1, temperature = 0.01, seed = 0)
+    cool.update([0, 1, 2], [1., 0.5, 0.])
+    assert torch.allclose(cool.probs, floored / floored.sum(), atol = 1e-6)
 
 def test_sgs_sampler_custom_hooks_and_schedules():
     configs = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
@@ -259,10 +279,166 @@ def test_sgs_wrapper_explicit_options_override_and_disable():
     assert torch.allclose(obs, torch.tensor([[0.0, 0.0]]))
     assert info['sgs_config_id'][0] == -1
 
-def test_sgs_all_export():
-    import env_ssl_wrapper
-    for name in ('SuccessGuidedSamplingWrapper', 'SGSWrapper', 'SGSSampler', 'sgs_score_fn'):
-        assert name in env_ssl_wrapper.__all__
+def test_sgs_default_score_is_sgs_score_fn():
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    sampler, explicit = SGSSampler(configs, seed = 1), SGSSampler(configs, score_fn = sgs_score_fn, seed = 1)
+
+    for s in (sampler, explicit):
+        s.update([0, 1], [1., 0.])
+
+    assert torch.allclose(sampler.weights, explicit.weights)
+
+def test_sgs_score_fn_swappable():
+    # the beta kernel is just the default - any rule of the bank goes, declaring only what it needs
+    sampler = SGSSampler([np.array([0.]), np.array([1.]), np.array([2.])], score_fn = lambda p: 1. - p.nan_to_num(0.), seed = 0)
+    sampler.update([0], [1.])
+
+    assert torch.allclose(sampler.weights, torch.tensor([0., 1., 1.]))  # mastered states drop out
+    assert len(sampler.trace) == 0  # logging stays opt in
+
+def test_sgs_score_fn_is_injected_with_the_bank_history_and_hparams():
+    seen = {}
+
+    def score_fn(p, counts, history, step, window, target):
+        seen.update(counts = counts.tolist(), history = [len(h) for h in history], step = step, window = window, target = target)
+        return torch.ones_like(p)
+
+    sampler = SGSSampler([np.array([0.]), np.array([1.])], score_fn = score_fn, target = lambda step: 0.1 * step, window = 5, seed = 0)
+    sampler.update([0], [1.])
+    sampler.update([0], [1.])
+
+    assert sampler.weights.sum() == 2.  # the score is computed lazily, on sampling
+    assert seen == dict(counts = [2, 0], history = [2, 0], step = 2, window = 5, target = 0.2)
+
+def test_sgs_score_fn_swapped_for_learning_progress():
+    # chase whichever reset state is moving fastest (Baranes & Oudeyer) - only expressible
+    # because the raw per state history is injected
+    def learning_progress(history):
+        older = torch.tensor([np.mean(list(h)[:len(h) // 2]) for h in history])
+        recent = torch.tensor([np.mean(list(h)[len(h) // 2:]) for h in history])
+        return (recent - older).abs()
+
+    sampler = SGSSampler([np.array([0.]), np.array([1.])], score_fn = learning_progress, window = 4, seed = 0)
+
+    for outcome in (0., 0., 1., 1.):  # state 0 just started succeeding
+        sampler.update([0], [outcome])
+    for _ in range(4):
+        sampler.update([1], [1.])  # state 1 is mastered, no longer moving
+
+    assert torch.allclose(sampler.weights, torch.tensor([1., 0.]))
+    assert {sampler.sample()[1] for _ in range(5)} == {0}
+
+def test_sgs_default_sample_is_sgs_sample_fn():
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    sampler, explicit = SGSSampler(configs, seed = 3), SGSSampler(configs, sample_fn = sgs_sample_fn, seed = 3)
+
+    for s in (sampler, explicit):
+        s.update([0], [1.])
+        s.update([2], [0.])
+
+    assert [sampler.sample()[1] for _ in range(8)] == [explicit.sample()[1] for _ in range(8)]
+
+def test_sgs_sample_fn_is_injected_with_the_bank_state_and_rng():
+    seen = {}
+
+    def sample_fn(p, counts, history, configs, weights, probs, rng, size, step, window,
+                  target, kappa, eps, unvisited_weight, uniform_prob, temperature):
+        seen.update(
+            p = p.tolist(),
+            counts = counts.tolist(),
+            history = [len(h) for h in history],
+            num_configs = len(configs),
+            num_weights = len(weights),
+            num_probs = len(probs),
+            size = size,
+            step = step,
+            window = window,
+            target = target,
+            kappa = kappa,
+            eps = eps,
+            unvisited_weight = unvisited_weight,
+            uniform_prob = uniform_prob,
+            temperature = temperature,
+            is_rng = isinstance(rng, np.random.Generator),
+        )
+        return torch.zeros(size, dtype = torch.long)  # tensors are accepted, not just numpy
+
+    sampler = SGSSampler([np.array([0.]), np.array([1.]), np.array([2.])], sample_fn = sample_fn, seed = 0)
+    sampler.update([0, 1, 2], [1., 1., 0.])
+
+    states, ids = sampler.sample(batch_size = 2)
+    assert (ids == 0).all() and all(np.allclose(state, [0.]) for state in states)
+    assert seen == dict(
+        p = [1., 1., 0.], counts = [1, 1, 1], history = [1, 1, 1], num_configs = 3,
+        num_weights = 3, num_probs = 3, size = 2, step = 3, window = 20, target = 0.5,
+        kappa = 2., eps = 0.05, unvisited_weight = 1., uniform_prob = 0., temperature = 1., is_rng = True,
+    )
+
+def test_sgs_sample_fn_swapped_for_unvisited_first():
+    # breadth before depth - try every config before trusting the scores; with
+    # unvisited_weight = 0. the raw scores alone would never pick the untried ones
+    def unvisited_first(probs, counts, rng, size):
+        untried = np.flatnonzero(counts.cpu().numpy() == 0)
+        if len(untried) > 0:
+            return rng.choice(untried, size = size)
+        return sgs_sample_fn(probs, rng, size)  # defer to the default draw
+
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    sampler = SGSSampler(configs, unvisited_weight = 0., sample_fn = unvisited_first, seed = 0)
+    sampler.update([0], [1.])
+
+    assert (sampler.weights[1:] == 0.).all()
+    assert {sampler.sample()[1] for _ in range(20)} == {1, 2}
+
+    # once every config has been credited, the hook hands back to the default draw
+    sampler.update([1], [1.])
+    sampler.update([2], [1.])
+    assert {sampler.sample()[1] for _ in range(30)} == {0, 1, 2}
+
+def test_sgs_sample_fn_swapped_for_a_custom_sampling_distribution():
+    # the beta shape is only the default - a custom sampler builds its own from the injected
+    # success rates and hparams, here re-centered on a lower competence, much sharper
+    def shifted_beta_sample_fn(p, counts, rng, size, kappa, eps):
+        weights = sgs_score_fn(p, counts, target = 0.2, kappa = 20. * kappa, eps = eps)
+        probs = weights / weights.sum()
+        return rng.choice(len(probs), size = size, p = probs.numpy())
+
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    sampler = SGSSampler(configs, sample_fn = shifted_beta_sample_fn, seed = 0)
+    sampler.update([0, 1, 2], [0.2, 0.5, 0.8])
+
+    assert {sampler.sample()[1] for _ in range(20)} == {0}
+
+def test_sgs_sampler_logs_progression_to_memory_and_file(tmp_path):
+    log_path = tmp_path / 'nested' / 'sgs.csv'
+    sampler = SGSSampler([np.array([0.]), np.array([1.])], log_every = 2, log_path = log_path, seed = 0)
+
+    sampler.update([0], [1.])
+    assert len(sampler.trace) == 0  # nothing until log_every episodes are credited
+
+    sampler.update([1], [0.])
+    assert sampler.trace[0]['step'] == 2
+    assert torch.allclose(sampler.trace[0]['success_rates'], torch.tensor([1., 0.]))
+
+    log = log_path.read_text().strip().split('\n')
+    assert log[0] == 'step,success_rate_0,success_rate_1,prob_0,prob_1' and len(log) == 2
+    assert len(SGSSampler([np.array([0.])]).trace) == 0  # off by default
+
+def test_sgs_wrapper_progression_logging(tmp_path):
+    log_path = tmp_path / 'sgs.csv'
+    env = SuccessGuidedSamplingWrapper(
+        StandardizeEnvWrapper(ConfigurableGoalEnv),
+        reset_configs = [np.array([0.2, 0.0])], log_every = 1, log_path = log_path, seed = 0
+    )
+
+    for _ in range(2):
+        env.reset()
+        done = False
+        while not done:
+            _, _, terminated, truncated, _ = env.step(torch.zeros(1, 2))
+            done = bool((terminated | truncated).any())
+
+    assert len(env.trace) == 2 and len(log_path.read_text().strip().split('\n')) == 3  # header + 2 rows
 
 class AutoResettingGoalEnv(ConfigurableGoalEnv):
     autoreset_mode = True
