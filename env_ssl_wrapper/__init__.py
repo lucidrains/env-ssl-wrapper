@@ -7,6 +7,7 @@ from .standardize import *  # noqa: F403
 
 from .memory_trace import MemoryTraceWrapper
 from .action_chunk import ActionChunkWrapper
+from .context import TimeWrapper, PastActionsWrapper, fourier_time
 from .sgs import (
     SuccessGuidedSamplingWrapper,
     SGSWrapper,
@@ -47,6 +48,9 @@ __all__ = [
     *standardize.__all__,
     'MemoryTraceWrapper',
     'ActionChunkWrapper',
+    'TimeWrapper',
+    'PastActionsWrapper',
+    'fourier_time',
     'SuccessGuidedSamplingWrapper',
     'SGSWrapper',
     'SGSSampler',

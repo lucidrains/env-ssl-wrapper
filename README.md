@@ -120,6 +120,42 @@ uv run test_action_chunk.py --sweep=True                 # PPO over several chun
 uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts match per-step reference
 ```
 
+### Time & Past Action
+
+Two small wrappers that append temporal context to the observation — the step index, and the action that led into the current state.
+
+```python
+import gymnasium as gym
+from env_ssl_wrapper import StandardizeEnvWrapper, TimeWrapper, PastActionsWrapper
+
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+env = TimeWrapper(env)          # obs['time']        -> (1, 1) raw ints, 0 at reset
+env = PastActionsWrapper(env)   # obs['past_action'] -> (1,) the action that led here, zeros on the first step
+```
+
+`TimeWrapper` supplies the per-episode timestep — raw integers by default, or any function of them as the feature:
+
+```python
+from env_ssl_wrapper import fourier_time
+
+env = TimeWrapper(env, transform = fourier_time)          # obs['time'] -> (1, 8) sin / cos features
+env = TimeWrapper(env, transform = lambda t: t.float())   # raw floats
+```
+
+`PastActionsWrapper` supplies the action that led into the current observation. The first step of an episode has no past action: it emits zeros, or `None` when `first_action = None`.
+
+```python
+env = PastActionsWrapper(env, key = 'prev_action', first_action = None)
+```
+
+Both wrappers track the batch slot by slot — an env that autoresets mid-rollout gets a fresh value — and both attach to the terminal `info['final_observation']` like the rest of the library.
+
+Run the CartPole demo — the one-hot last action fed back in, against a zeros control, same learner, seed and budget:
+
+```bash
+uv run train_cartpole.py    # both arms converge to a perfect greedy 500.0
+```
+
 ### Success-Guided Sampling
 
 Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `target` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2610.12465))
@@ -180,6 +216,8 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `tensor` | NumPy → torch on a device, torch actions → numpy for the sim. |
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
+| `time` | Supplies the per-episode timestep. `('time', dict(transform = fourier_time))` |
+| `past_action` | Supplies the last action. `('past_action', dict(first_action = None))` |
 | `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(reset_configs = configs, target = 0.5, kappa = 2.))` |
 
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.

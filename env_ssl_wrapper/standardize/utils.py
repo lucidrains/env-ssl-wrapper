@@ -38,6 +38,14 @@ def get_wrapper(name):
         from ..action_chunk import ActionChunkWrapper
         return ActionChunkWrapper
 
+    if name in ('time', 'timestep'):
+        from ..context import TimeWrapper
+        return TimeWrapper
+
+    if name in ('past_action', 'past_actions'):
+        from ..context import PastActionsWrapper
+        return PastActionsWrapper
+
     if name in ('sgs', 'success_guided_sampling'):
         from ..sgs import SuccessGuidedSamplingWrapper
         return SuccessGuidedSamplingWrapper
@@ -45,7 +53,7 @@ def get_wrapper(name):
     if name in WRAPPERS:
         return WRAPPERS[name]
 
-    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "sgs", "standardize_env"])}')
+    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "sgs", "standardize_env"])}')
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):

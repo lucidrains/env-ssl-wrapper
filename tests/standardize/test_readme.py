@@ -229,3 +229,32 @@ def test_readme_sgs_snippet():
     assert obs.shape == (1, 4)
     assert 'sgs_config_id' in info
 
+def test_readme_time_and_past_action_snippet():
+    from env_ssl_wrapper import (
+        StandardizeEnvWrapper,
+        TimeWrapper,
+        PastActionsWrapper,
+        fourier_time,
+    )
+
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    env = TimeWrapper(env)
+    env = PastActionsWrapper(env)
+
+    obs, info = env.reset()
+    assert set(obs.keys()) == {'obs', 'time', 'past_action'}
+    assert obs['time'].shape == (1, 1)
+    assert obs['past_action'].shape == (1,)
+
+    obs, reward, terminated, truncated, info = env.step(torch.tensor(1))
+    assert obs['time'].tolist() == [[1]]
+    assert obs['past_action'].tolist() == [1]
+
+    env = TimeWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), transform = fourier_time)
+    obs, info = env.reset()
+    assert obs['time'].shape == (1, 8)
+
+    env = PastActionsWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), key = 'prev_action', first_action = None)
+    obs, info = env.reset()
+    assert obs['prev_action'] is None
+
