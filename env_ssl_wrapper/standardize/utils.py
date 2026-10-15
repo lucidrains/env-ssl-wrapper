@@ -50,10 +50,14 @@ def get_wrapper(name):
         from ..sgs import SuccessGuidedSamplingWrapper
         return SuccessGuidedSamplingWrapper
 
+    if name in ('state_norm', 'normalize_state', 'normalization'):
+        from ..normalize import StateNormalizationWrapper
+        return StateNormalizationWrapper
+
     if name in WRAPPERS:
         return WRAPPERS[name]
 
-    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "sgs", "standardize_env"])}')
+    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "sgs", "state_norm", "standardize_env"])}')
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):

@@ -18,6 +18,7 @@ class StandardizeEnvWrapper(EnvWrapper):
         pad_episodes: bool = True,
         done_tracker: bool = True,
         flatten_obs: bool = False,
+        normalize_state: bool | str | tuple[str, ...] | list[str] | set[str] | dict = False,
         action_transform: bool | dict = False,
         max_timesteps: int | None = None,
         image_size: int | tuple[int, int] | None = None,
@@ -59,6 +60,16 @@ class StandardizeEnvWrapper(EnvWrapper):
 
         if flatten_obs:
             wrappers.append('flatten_obs')
+
+        if normalize_state:
+            if isinstance(normalize_state, dict):
+                normalize_kwargs = normalize_state
+            elif isinstance(normalize_state, (str, tuple, list, set)):
+                normalize_kwargs = dict(keys = normalize_state)
+            else:
+                normalize_kwargs = dict()
+
+            wrappers.append(('state_norm', normalize_kwargs))
 
         if exists(reset_configs):
             wrappers.append(('sgs', dict(reset_configs = reset_configs, **(sgs_kwargs or {}))))

@@ -71,6 +71,104 @@ Run the PPO benchmark on POMDP LunarLander:
 uv run test_memory_trace.py
 ```
 
+### State Normalization
+
+Running mean / std normalization of the states leaving the environment — Welford statistics, exact under any update order, one accumulator per obs key.
+
+```python
+import gymnasium as gym
+from env_ssl_wrapper import StandardizeEnvWrapper, StateNormalizationWrapper
+
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+env = StateNormalizationWrapper(env)          # update_mode = 'live'
+
+obs, info = env.reset()
+obs, *_ = env.step(...)                       # normalized with the running statistics
+
+env.mean('obs'), env.std('obs'), env.count('obs')
+env.denormalize(obs)                          # back to the sim's units
+```
+
+For dictionary observations, you can normalize all floating point state leaves, target a subset of keys, or track multiple keys with separate statistics:
+
+```python
+# normalize only a subset of keys (other keys pass through untouched)
+env = StateNormalizationWrapper(dict_env, keys = 'proprio')
+
+# or multiple keys, each with its own separate running statistics
+env = StateNormalizationWrapper(dict_env, keys = ('proprio', 'goal'))
+
+# or through StandardizeEnvWrapper directly
+env = StandardizeEnvWrapper(dict_env, normalize_state = 'proprio')
+env = StandardizeEnvWrapper(dict_env, normalize_state = ('proprio', 'goal'))
+```
+
+`update_mode` decides *when* the statistics move:
+
+| mode | statistics |
+|---|---|
+| `'live'` | folded in on every `reset` / `step` — a state is normalized with the statistics as they stood before it arrived (gymnasium / SB3 style) |
+| `'deferred'` | frozen for the current rollout, new states accumulate in `env.pending` — commit them when the learner has updated |
+| `'frozen'` | never folded in — evaluation |
+
+The deferred schedule is the RSMNorm one from x-ppo: the actor and critic train against one snapshot of the statistics per rollout, and the commit happens after the actor-critic update.
+
+```python
+env = StateNormalizationWrapper(env, update_mode = 'deferred')
+
+for iteration in range(...):
+    ...                      # collect a rollout - states leave the env normalized with the committed statistics
+    ppo_update(...)
+    env.commit_stats()       # make this rollout's states current
+
+# evaluation runs on a frozen copy of the training statistics
+eval_env.load_state_dict(env.state_dict())
+eval_env.update_mode = 'frozen'
+```
+
+`commit_stats()` needs no raw states: the pending accumulator holds exact sufficient statistics (count / mean / variance), so it can be stored in a memmap replay buffer as normalized states and committed at the update boundary all the same. For pipelines that keep raw states, `commit_stats(raw_states)` folds external data in — a tensor, an iterable of batches (a replay buffer dataloader), or a dict keyed by obs key.
+
+Because states are normalized as they leave the env, every consumer sees the same tensor, so a transition written to a replay buffer pairs with the normalized state the actor actually consumed — consistent with its stored log prob and value no matter when the statistics were committed.
+
+#### Distributed
+
+Under `torchrun` every rank sees its own slice of the state distribution, so per-rank statistics are different random variables and each rank would normalize with a different affine transform. Committing globally all-reduces the pending statistics — every rank ends with the moments of the union of all ranks' states, identical to what a single process would have, and every rank normalizes identically:
+
+```python
+env.commit_stats(distributed = True)   # the deferred schedule - call it on every rank after the learner's update
+env.sync_stats()                       # live mode - pull the per-rank running statistics together, e.g. per rollout
+```
+
+```bash
+torchrun --nproc_per_node=4 test_state_norm_distributed.py
+# deferred - commit_stats(distributed = True)
+#   union states:   2373 | statistics count: 2374 | prior: 1
+#   count == union count: True | identical across ranks: True | probe identical: True
+#   max |mean - reference|: 5.551e-17 | max |std - reference|: 4.441e-16
+```
+
+Each rank folds its own terminal states and skips its own padded slots as usual; the merge strips each rank's pseudo count and adds one back, so the global count and moments come out the same as the single process reference.
+
+Terminal states are folded from `info['final_observation']`, zero padded slots of autoresetting vector envs are skipped, and only floating point leaves are touched. A single pseudo-observation (mean 0, variance 1) is counted in from the start, so an untrained statistic normalizes near identity instead of amplifying a constant state dimension without bound — pass `prior_count = 0.` for pure empirical moments.
+
+Run the benchmark — live vs deferred statistics, both against no normalization at all, on cartpole states put through a fixed scaler so the dimensions are badly conditioned:
+
+```bash
+uv run train_state_norm.py --steps=50000 --seeds=0,1,2
+uv run train_state_norm.py --envs=CartPole-v1,Acrobot-v1 --variants=raw,severe
+uv run analyze_state_norm.py     # per-arm finals / auc, and the paired live vs deferred difference
+
+# and the same question one level down — the size of the states the actor consumes, step by step
+uv run probe_state_norm.py
+```
+
+Also available through composition:
+
+```python
+env = compose_env(gym.make('CartPole-v1'), ('state_norm', dict(update_mode = 'deferred')))
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'), normalize_state = dict(update_mode = 'deferred'))
+```
+
 ### Action Chunk
 
 Open-loop action chunking: one `step` executes a whole chunk of actions and returns only the final state, temporally compressing the environment by the chunk length.
@@ -224,6 +322,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
 | `time` | Supplies the per-episode timestep. `('time', dict(transform = fourier_time))` |
 | `past_action` | Supplies the last action. `('past_action', dict(first_action = None))` |
+| `state_norm` | Running mean / std normalization of states, live or deferred until the learner updates. `('state_norm', dict(update_mode = 'deferred'))` |
 | `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(reset_configs = configs, target = 0.5, kappa = 2.))` |
 
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.
@@ -330,6 +429,9 @@ stats.summary()                   # dict(episodes, mean, std, min, max)
 ```bash
 uv sync --extra test
 uv run pytest
+
+# distributed statistics — every rank ends with the union statistics, bitwise identical
+torchrun --nproc_per_node=4 test_state_norm_distributed.py
 ```
 
 ## Citations
