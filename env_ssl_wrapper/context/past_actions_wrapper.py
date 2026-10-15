@@ -44,6 +44,7 @@ class PastActionsWrapper(TransformObservationWrapper):
     The first step of an episode (a reset, or a fresh autoreset slot) has no past action:
     it emits zeros, or `None` when `first_action = None`. When only some slots of a batch
     are fresh — a batched tensor cannot hold `None` — those slots fall back to zeros.
+    Pass `has_past_actions_key` to also emit a `Bool[num_envs]` field marking the slots with one.
     """
 
     priority = 80
@@ -54,6 +55,7 @@ class PastActionsWrapper(TransformObservationWrapper):
         key: str = 'past_action',
         first_action = 'zeros',
         obs_key: str = 'obs',
+        has_past_actions_key: str | None = None,
     ):
         super().__init__(env)
         assert first_action in ('zeros', None), "first_action must be 'zeros' or None"
@@ -61,23 +63,32 @@ class PastActionsWrapper(TransformObservationWrapper):
         self.key = key
         self.first_action = first_action
         self.obs_key = obs_key
+        self.has_past_actions_key = has_past_actions_key
 
         self.num_envs = env_num_envs(env)
         self.vectorized = is_vectorized(env)
         self.zero_action = infer_zero_action(env, self.num_envs, self.vectorized) if exists(first_action) else None
 
-    def _attach(self, obs, value):
+    def _attach(self, obs, value, fresh):
         device = obs_device(obs)
 
         if exists(value) and is_tensor(value) and exists(device):
             value = value.to(device)
 
-        return attach_obs(obs, self.key, value, self.obs_key)
+        obs = attach_obs(obs, self.key, value, self.obs_key)
+
+        if not exists(self.has_past_actions_key):
+            return obs
+
+        # a Bool[num_envs] flag for the slots that actually have a past action
+
+        has_past_actions = ~torch.as_tensor(fresh, dtype = torch.bool, device = device)
+        return attach_obs(obs, self.has_past_actions_key, has_past_actions, self.obs_key)
 
     def transform_obs(self, obs, done = None):
         # reset observations — fresh autoreset slots are handled in step
 
-        return self._attach(obs, self.zero_action)
+        return self._attach(obs, self.zero_action, torch.ones(self.num_envs, dtype = torch.bool))
 
     def _action_value(self, action):
         if not exists(action):
@@ -117,11 +128,12 @@ class PastActionsWrapper(TransformObservationWrapper):
 
         action_value = self._action_value(action)
 
+        fresh = done_mask(done, self.num_envs) & self.autoresets
+
         # terminal observations belong to the transition the action just drove
 
-        maybe_transform_final_observation(info, lambda final_obs: self._attach(final_obs, action_value))
+        maybe_transform_final_observation(info, lambda final_obs: self._attach(final_obs, action_value, torch.zeros_like(fresh)))
 
-        fresh = done_mask(done, self.num_envs) & self.autoresets
-        out = self._attach(obs, self._filled(action_value, fresh))
+        out = self._attach(obs, self._filled(action_value, fresh), fresh)
 
         return out, reward, terminated, truncated, info

@@ -222,6 +222,46 @@ def test_past_action_with_standardize_wrapper():
     assert obs['past_action'].tolist() == [1]
     assert obs['past_action'].dtype == torch.long
 
+def test_past_action_has_past_actions_flag():
+    env = PastActionsWrapper(MockEnv(), has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'].item() == 0
+    assert obs['has_past_actions'].shape == (1,)
+    assert not obs['has_past_actions'].item()
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_action'].item() == 1
+    assert obs['has_past_actions'].item()
+
+def test_past_action_has_past_actions_none_first_action():
+    env = PastActionsWrapper(MockEnv(), first_action = None, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'] is None
+    assert obs['has_past_actions'].tolist() == [False]
+
+def test_past_action_has_past_actions_vector_autoreset():
+    env = PastActionsWrapper(MockAutoresetVecEnv(), has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['has_past_actions'].tolist() == [False, False]
+
+    obs, *_ = env.step(torch.tensor([1, 1]))
+    # slot 0 autoresets -> no past action, slot 1 -> the action just taken
+    assert obs['past_action'].tolist() == [0, 1]
+    assert obs['has_past_actions'].tolist() == [False, True]
+
+def test_past_action_has_past_actions_final_observation():
+    env = PastActionsWrapper(MockFinalObsEnv(), has_past_actions_key = 'has_past_actions')
+    env.reset()
+    env.step(torch.tensor(1))
+
+    _, _, terminated, _, info = env.step(torch.tensor(0))
+
+    assert terminated
+    assert info['final_observation']['has_past_actions'].item()
+
 def test_context_wrappers_compose():
     import gymnasium as gym
 

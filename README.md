@@ -148,6 +148,12 @@ env = TimeWrapper(env, transform = lambda t: t.float())   # raw floats
 env = PastActionsWrapper(env, key = 'prev_action', first_action = None)
 ```
 
+Keep everything tensor-valued with `has_past_actions_key` — the first step emits zeros, and a `Bool[num_envs]` field says which slots actually have a past action (this is what `PastActionEncoder` from `x-mlps-pytorch` reads):
+
+```python
+env = PastActionsWrapper(env, has_past_actions_key = 'has_past_actions')   # obs['has_past_actions'] -> (num_envs,) bools
+```
+
 Both wrappers track the batch slot by slot — an env that autoresets mid-rollout gets a fresh value — and both attach to the terminal `info['final_observation']` like the rest of the library.
 
 Run the CartPole demo — the one-hot last action fed back in, against a zeros control, same learner, seed and budget:

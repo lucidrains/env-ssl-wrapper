@@ -258,3 +258,11 @@ def test_readme_time_and_past_action_snippet():
     obs, info = env.reset()
     assert obs['prev_action'] is None
 
+    env = PastActionsWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), has_past_actions_key = 'has_past_actions')
+    obs, info = env.reset()
+    assert obs['past_action'].tolist() == [0]
+    assert obs['has_past_actions'].tolist() == [False]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['has_past_actions'].tolist() == [True]
+
