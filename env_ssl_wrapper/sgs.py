@@ -236,15 +236,31 @@ class SGSSampler:
         self.counts = torch.zeros(len(self.configs), dtype = torch.long)
         self.step_count = 0
 
+        self._cache: dict = {}
+        self._version = 0
+
         self.rng = np.random.default_rng(seed)
+
+    def _memo(self, key: str, compute):
+        # rates / weights / probs are recomputed on every reseed otherwise
+        # (1024 per cycle x 48 cells x ~window-size means)
+
+        version = (self._version, self.step_count)
+
+        if self._cache.get(key + '_v') != version:
+            self._cache[key] = compute()
+            self._cache[key + '_v'] = version
+
+        return self._cache[key]
 
     def __len__(self) -> int:
         return len(self.configs)
 
     @property
     def success_rates(self) -> torch.Tensor:
-        rates = [float(np.mean(h)) if len(h) else float('nan') for h in self.history]
-        return torch.tensor(rates, dtype = torch.float32)
+        return self._memo('rates', lambda: torch.tensor(
+            [float(np.mean(h)) if len(h) else float('nan') for h in self.history], dtype = torch.float32
+        ))
 
     def _bank_args(self, step: int) -> dict:
         # the common bank state both hooks are handed - the score fn sees this, the sampler
@@ -267,15 +283,16 @@ class SGSSampler:
         # score_fn is swappable - handed, by name, whatever it declares (see `inject_args`),
         # sgs_score_fn by default
 
-        score_fn = self.score_fn if exists(self.score_fn) else sgs_score_fn
+        def compute():
+            score_fn = self.score_fn if exists(self.score_fn) else sgs_score_fn
+            weights = score_fn(**inject_args(score_fn, self._bank_args(self.step_count)))
+            return torch.as_tensor(weights, dtype = torch.float32).clamp(min = 0.)
 
-        weights = score_fn(**inject_args(score_fn, self._bank_args(self.step_count)))
-
-        return torch.as_tensor(weights, dtype = torch.float32).clamp(min = 0.)
+        return self._memo('weights', compute)
 
     @property
     def probs(self) -> torch.Tensor:
-        return self._mixed_probs(self._sampling_weights(self.weights))
+        return self._memo('probs', lambda: self._mixed_probs(self._sampling_weights(self.weights)))
 
     def _effective_temperature(self) -> float:
         # the paper floors the temperature at one: T_eff = max(T, 1)

@@ -100,6 +100,59 @@ def test_auto_rescale_torch():
 
     assert torch.allclose(torch.from_numpy(env.unwrapped.last_action), torch.tensor([-1.0, 2.0]))
 
+# an overshoot maps the range slightly past each bound and clips the excess back onto them -
+# so a policy whose mean saturates short of the end of its range still reaches the env bound
+
+def test_auto_rescale_overshoot():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True, overshoot = 0.05)
+
+    # the center stays the center, 0.98 saturates short of 1.0 but still lands exactly on the bound
+
+    env.step(np.array([0.5, 0.98], dtype = np.float32))
+    assert np.allclose(env.unwrapped.last_action, np.array([0.0, 2.0]))
+
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True, overshoot = 0.05)
+    env.step(torch.tensor([0.5, 0.98]))
+    assert torch.allclose(torch.from_numpy(env.unwrapped.last_action), torch.tensor([0.0, 2.0]))
+
+def test_auto_rescale_overshoot_per_dim_bounds():
+    env = ActionTransformWrapper(BoundedMockEnv([-2., 0.], [0., 4.]), auto = True, overshoot = 0.05)
+    env.step(np.array([0.5, 0.5], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([-1.0, 2.0]))
+
+# a policy on (-1, 1) - mean-conc-beta's default range - onto a (-2, 2) env, no policy-side change
+
+def test_auto_rescale_overshoot_from_range():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True, from_range = (-1., 1.), overshoot = 0.1)
+
+    # 0.5 stretches to 1.1, a mean saturated short of its own bound still lands on the env's
+
+    env.step(np.array([0.5, 0.9667], dtype = np.float32))
+    assert np.allclose(env.unwrapped.last_action, np.array([1.1, 2.0]))
+
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True, from_range = (-1., 1.), overshoot = 0.1)
+    env.step(torch.tensor([-0.9667, 0.5]))
+    assert torch.allclose(torch.from_numpy(env.unwrapped.last_action), torch.tensor([-2.0, 1.1]))
+
+def test_auto_rescale_overshoot_unbounded_dims_passthrough():
+    env = ActionTransformWrapper(BoundedMockEnv([-np.inf, -2.], [np.inf, 2.]), auto = True, overshoot = 0.05)
+    env.step(np.array([0.5, 0.5], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([0.5, 0.0]))
+
+def test_auto_rescale_overshoot_requires_auto():
+    with pytest.raises(AssertionError):
+        ActionTransformWrapper(BoundedMockEnv(-2., 2.), overshoot = 0.05)
+
+# from_range can be per dimension, e.g. per-action beta bounds
+
+def test_auto_rescale_per_dim_from_range():
+    env = ActionTransformWrapper(BoundedMockEnv(-2., 2.), auto = True, from_range = ((0., -1.), (1., 1.)))
+    env.step(np.array([0.75, 0.0], dtype = np.float32))
+
+    assert np.allclose(env.unwrapped.last_action, np.array([1.0, 0.0]))
+
 def test_auto_rescale_discrete_passthrough():
     env = ActionTransformWrapper(GymnasiumDiscreteMockEnv(), auto = True)
     env.step(np.int64(1))

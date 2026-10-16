@@ -24,6 +24,14 @@ def clamp(t, min_val, max_val):
         return np.clip(t, min_val, max_val).astype(t.dtype, copy = False)
     return max(min_val, min(t, max_val))
 
+def as_type(x, ref):
+    # scalar or per-dimension value, in the action's type - torch or numpy
+
+    if is_tensor(ref):
+        return torch.as_tensor(x, device = ref.device, dtype = ref.dtype)
+
+    return np.asarray(x, dtype = float)
+
 def rescale(
     t,
     from_range: tuple[float, float],
@@ -56,12 +64,16 @@ class ActionTransformWrapper(EnvWrapper):
         transforms = None,
         clip = None,
         auto = False,
-        from_range = (0.0, 1.0)
+        from_range = (0.0, 1.0),
+        overshoot = None
     ):
         super().__init__(env)
         self.clip = clip
         self.auto = auto
         self.from_range = from_range
+        self.overshoot = overshoot
+
+        assert auto or not exists(overshoot), 'overshoot applies to the auto rescale - pass auto = True'
 
         if isinstance(transforms, dict):
             transforms = [transforms]
@@ -80,7 +92,11 @@ class ActionTransformWrapper(EnvWrapper):
 
     def auto_transform(self, t):
         # rescale canonical range (default (0, 1), beta-friendly) to per-env
-        # bounds, leaving unbounded dimensions untouched
+        # bounds, leaving unbounded dimensions untouched.
+        #
+        # an overshoot maps the range that fraction of the half range past each bound, and the
+        # clamp below trims the excess back onto the bound - so a policy whose mean saturates
+        # short of a bound still reaches it
 
         if not exists(self.bounds):
             return t
@@ -116,7 +132,11 @@ class ActionTransformWrapper(EnvWrapper):
             low = np.where(valid, low, 0.)
             high = np.where(valid, high, 1.)
 
-        rescaled = rescale(t, self.from_range, (low, high))
+        # pad the target range by the overshoot, the clamp below trims the excess
+
+        pad = as_type(default(self.overshoot, 0.), t) * (high - low) / 2
+
+        rescaled = rescale(t, tuple(as_type(r, t) for r in self.from_range), (low - pad, high + pad))
 
         if is_tensor(t):
             rescaled = torch.where(valid_t, torch.clamp(rescaled, low, high), t)

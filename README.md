@@ -316,7 +316,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `done_tracker` | Tracks per-env `episode_lengths`, exposes `env.all_done` / `env.needs_reset`. |
 | `pad_episodes` | Standardizes padding for uneven vectorized episodes: done envs emit zeros (float/int) / `False` (bool) obs, and rewards are zeroed from the step after termination onward (the terminating step's own reward is the real terminal transition reward and is preserved). Applied automatically to vectorized envs. Works for autoreset (Isaac, gymnasium) and non-autoreset (pufferlib, maniskill) envs alike. |
 | `auto_batch` | Gives single envs a leading batch dim: `(4,)` → `(1, 4)`. |
-| `action_transform` | Rescales actions from a canonical `(0, 1)` range to the env's bounds. |
+| `action_transform` | Rescales actions from a canonical `(0, 1)` range to the env's bounds, with optional `overshoot` past them. `('action_transform', dict(auto = True, overshoot = 0.1))` |
 | `tensor` | NumPy → torch on a device, torch actions → numpy for the sim. |
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
@@ -328,6 +328,70 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.
 
 Terminated envs are uniformly padded (zeros / `False` obs; rewards zeroed only after the terminating step, so the terminal transition's reward is never lost), and `info['final_observation']` — the true terminal obs, frozen per env and re-emitted while the env stays done — is always present once any env has terminated, with `info['_final_observation']` masking which envs it applies to. `env.is_done` always reflects the per-env done mask.
+
+### Action Transform
+
+Maps a policy's action range onto the env's action bounds, then clips. `auto = True` reads the bounds off the env and rescales `from_range` (default `(0, 1)`, beta-friendly) onto them, leaving unbounded dimensions untouched:
+
+```python
+from env_ssl_wrapper import ActionTransformWrapper
+
+env = ActionTransformWrapper(env, auto = True)
+```
+
+`overshoot` lands the mapping that fraction of the half range past each bound, and the clip pulls the excess back onto the bounds — so a bounded policy whose mean saturates a few percent short of its own range (mean-conc-beta at a bound) can still sit exactly on the env's bound:
+
+```python
+env = ActionTransformWrapper(env, auto = True, overshoot = 0.1)
+
+# a policy mean at 96% of its range -> 2.115 on (-2, 2) -> clipped onto 2.0
+```
+
+The policy keeps emitting raw actions and the clip lives on the env side, so log probs and policy gradients stay exact. `0.05` clears the usual saturation gap; `0.2` to `0.25` measured best on Pendulum-v1 over 16 seeds. The mapping stretches the interior by the same factor, so keep it small when action magnitude carries meaning outside the policy (behavior cloning, Q on actions) — or skip the stretch entirely by declaring the widened range on the policy and clipping only:
+
+```python
+# policy emits on (-2.2, 2.2), env takes (-2, 2) — identity inside, clip outside
+env = ActionTransformWrapper(env, clip = (-2., 2.))
+```
+
+Passing `overshoot` without `auto` raises.
+
+Everything the auto path does can also be written out by hand — the overshoot lives in the `to_range`, and `clip` is applied last:
+
+```python
+env = ActionTransformWrapper(
+    env,
+    transforms = [dict(rescale_from_to = ((-1., 1.), (-2.2, 2.2)))],
+    clip = (-2., 2.)
+)
+
+# 0.5 -> 1.1, and a saturated 0.9615 -> 2.115 -> 2.0
+```
+
+`transforms` takes a list, with `indices` for per-dimension ranges, and `clip` takes per-dimension bounds:
+
+```python
+import numpy as np
+
+env = ActionTransformWrapper(
+    env,
+    transforms = [
+        dict(indices = slice(0, 1), rescale_from_to = ((0., 1.), (-1.1, 1.1))),
+        dict(indices = slice(1, 2), rescale_from_to = ((0., 1.), (0., 2.2)))
+    ],
+    clip = (np.array([-1., 0.]), np.array([1., 2.]))
+)
+```
+
+A bounded policy can hand over the settings in one dict — mean-conc-beta, for instance:
+
+```python
+from mean_conc_beta import Beta
+
+beta = Beta(bounds = (-2., 2.), overshoot = 0.2)
+
+env = ActionTransformWrapper(env, **beta.action_transform_kwargs())
+```
 
 ### Conforming Janky Simulators
 
