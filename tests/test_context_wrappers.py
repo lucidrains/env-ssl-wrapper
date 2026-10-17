@@ -157,6 +157,116 @@ def test_past_action_invalid_first_action():
     with pytest.raises(AssertionError):
         PastActionsWrapper(MockEnv(), first_action = 'ones')
 
+    with pytest.raises(AssertionError):
+        PastActionsWrapper(MockEnv(), num_past_actions = 0)
+
+def test_past_action_two_actions():
+    env = PastActionsWrapper(MockEnv(), num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'].tolist() == [0, 0]
+    assert obs['has_past_actions'].tolist() == [[False, False]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_action'].tolist() == [0, 1]
+    assert obs['has_past_actions'].tolist() == [[False, True]]
+
+    obs, *_ = env.step(torch.tensor(0))
+    assert obs['past_action'].tolist() == [1, 0]
+    assert obs['has_past_actions'].tolist() == [[True, True]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_action'].tolist() == [0, 1]
+
+def test_past_action_two_actions_none_first_action():
+    env = PastActionsWrapper(MockEnv(), first_action = None, num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'] is None
+    assert obs['has_past_actions'].tolist() == [[False, False]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_action'].tolist() == [0, 1]
+    assert obs['has_past_actions'].tolist() == [[False, True]]
+
+def test_past_action_two_actions_vector_autoreset():
+    env = PastActionsWrapper(MockAutoresetVecEnv(), num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'].tolist() == [[0, 0], [0, 0]]
+    assert obs['has_past_actions'].tolist() == [[False, False], [False, False]]
+
+    obs, *_ = env.step(torch.tensor([1, 1]))
+    # slot 0 autoresets -> its history is cleared, slot 1 -> [padding, 1]
+    assert obs['past_action'].tolist() == [[0, 0], [0, 1]]
+    assert obs['has_past_actions'].tolist() == [[False, False], [False, True]]
+
+    obs, *_ = env.step(torch.tensor([0, 1]))
+    assert obs['past_action'].tolist() == [[0, 0], [1, 1]]
+    assert obs['has_past_actions'].tolist() == [[False, True], [True, True]]
+
+def test_past_action_two_actions_none_all_fresh():
+    class AllFreshVecEnv:
+        num_envs = 2
+        is_vector = True
+        autoresets = True
+        action_space = DiscreteSpace(2)
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return torch.zeros(2, 2), {}
+
+        def step(self, action):
+            self.t += 1
+            all_fresh = torch.tensor([self.t == 1, self.t == 1])
+            return torch.ones(2, 2), torch.ones(2), all_fresh, torch.zeros(2, dtype = torch.bool), {}
+
+    env = PastActionsWrapper(AllFreshVecEnv(), first_action = None, num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+    assert obs['past_action'] is None
+
+    obs, *_ = env.step(torch.tensor([1, 1]))
+    # every slot autoreset -> the new episodes have no past actions
+    assert obs['past_action'] is None
+    assert obs['has_past_actions'].tolist() == [[False, False], [False, False]]
+
+    obs, *_ = env.step(torch.tensor([0, 1]))
+    assert obs['past_action'].tolist() == [[0, 0], [0, 1]]
+    assert obs['has_past_actions'].tolist() == [[False, True], [False, True]]
+
+def test_past_action_two_actions_box_shape():
+    class MockBoxEnv:
+        action_space = Space((2,))
+
+        def reset(self, **kwargs):
+            return torch.zeros(3), {}
+
+        def step(self, action):
+            return torch.zeros(3), 1., torch.tensor(False), torch.tensor(False), {}
+
+    env = PastActionsWrapper(MockBoxEnv(), num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'].shape == (2, 2)
+    assert obs['has_past_actions'].shape == (1, 2)
+    assert torch.allclose(obs['past_action'], torch.zeros(2, 2))
+
+    obs, *_ = env.step(torch.tensor([1., 2.]))
+    assert torch.allclose(obs['past_action'], torch.tensor([[0., 0.], [1., 2.]]))
+    assert obs['has_past_actions'].tolist() == [[False, True]]
+
+def test_past_action_two_actions_final_observation():
+    env = PastActionsWrapper(MockFinalObsEnv(), num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    env.reset()
+    env.step(torch.tensor(1))
+
+    obs, _, terminated, _, info = env.step(torch.tensor(0))
+
+    assert terminated
+    assert obs['past_action'].tolist() == [1, 0]
+    assert info['final_observation']['past_action'].tolist() == [1, 0]
+    assert info['final_observation']['has_past_actions'].tolist() == [[True, True]]
+
 def test_past_action_vector_autoreset():
     env = PastActionsWrapper(MockAutoresetVecEnv())
     obs, _ = env.reset()
@@ -222,6 +332,20 @@ def test_past_action_with_standardize_wrapper():
     assert obs['past_action'].tolist() == [1]
     assert obs['past_action'].dtype == torch.long
 
+def test_past_action_two_actions_with_standardize_wrapper():
+    import gymnasium as gym
+
+    env = PastActionsWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert obs['past_action'].shape == (1, 2)
+    assert obs['has_past_actions'].shape == (1, 2)
+    assert obs['has_past_actions'].tolist() == [[False, False]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_action'].tolist() == [[0, 1]]
+    assert obs['has_past_actions'].tolist() == [[False, True]]
+
 def test_past_action_has_past_actions_flag():
     env = PastActionsWrapper(MockEnv(), has_past_actions_key = 'has_past_actions')
     obs, _ = env.reset()
@@ -271,6 +395,19 @@ def test_context_wrappers_compose():
     obs, _ = env.reset()
 
     assert set(obs.keys()) == {'obs', 'time', 'past_action'}
+
+def test_past_action_two_actions_with_compose_env():
+    import gymnasium as gym
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        'auto_batch',
+        ('past_action', dict(num_past_actions = 2, has_past_actions_key = 'has_past_actions'))
+    )
+    obs, _ = env.reset()
+
+    assert obs['past_action'].shape == (1, 2)
+    assert obs['has_past_actions'].tolist() == [[False, False]]
 
 # exports
 

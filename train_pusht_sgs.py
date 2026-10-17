@@ -209,7 +209,6 @@ def train(
     critic_sigmoid = False,
     value_clip = 0.0,
     entropy_coef = 5e-4,
-    run_dir = None,
     progression_path = None,
     checkpoint_path = None,
     verbose = True,
@@ -254,20 +253,22 @@ def train(
             obs = np.stack([e.reset(seed = seed_base + 1000 * ep + i, options = dict(reset_to_state = c))[0] for i, (e, c) in enumerate(zip(bank_envs, configs))]).astype(np.float32)
             done = np.zeros(len(configs), dtype = bool)
 
-            for _ in range(max_timesteps):
-                if done.all():
-                    break
+            # one seeded stream per episode, so sampled actions stay independent across steps
 
-                dist, m = get_dist(torch.from_numpy(obs))
+            with torch.random.fork_rng():
+                torch.manual_seed(seed_base + 7 * ep + 1)
 
-                with torch.random.fork_rng():
-                    torch.manual_seed(seed_base + 7 * ep + 1)
+                for _ in range(max_timesteps):
+                    if done.all():
+                        break
+
+                    dist, m = get_dist(torch.from_numpy(obs))
                     act_np = (m if use_mean else dist.sample().clamp(0.01, 0.99)).numpy()
 
-                for i in np.where(~done)[0]:
-                    obs[i], _, term, trunc, _ = bank_envs[i].step(to_env_action(obs[i], act_np[i]))
-                    if term or trunc:
-                        succ[ep, i], done[i] = float(term), True
+                    for i in np.where(~done)[0]:
+                        obs[i], _, term, trunc, _ = bank_envs[i].step(to_env_action(obs[i], act_np[i]))
+                        if term or trunc:
+                            succ[ep, i], done[i] = float(term), True
 
         return succ.mean(0)
 
@@ -317,7 +318,8 @@ def train(
             rets, advs = rets.T.reshape(-1), advs.T.reshape(-1)
             if value_clip > 0.:
                 rets = rets.clamp(0., value_clip)
-            advs = (advs - advs.mean()) / advs.std().clamp(min = 0.08)
+            if advs.numel() > 1 and advs.std() > 1e-8:
+                advs = (advs - advs.mean()) / advs.std().clamp(min = 0.08)
 
         Sf, Af, LPf = torch.cat(S), torch.cat(A), torch.cat(LP)
         for _ in range(epochs):
@@ -527,7 +529,6 @@ def main(
             max_timesteps = max_timesteps, eval_every = eval_every, eval_episodes = eval_episodes,
             lr = lr, target = target, kappa = kappa,
             success_bonus = success_bonus, critic_sigmoid = critic_sigmoid, value_clip = value_clip, entropy_coef = entropy_coef,
-            run_dir = run_dir,
             progression_path = run_dir / f'sgs_progression_{method}_{seed}.csv',
             checkpoint_path = run_dir / f'actor_{method}_{seed}.pt',
         )

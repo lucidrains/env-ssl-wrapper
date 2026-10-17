@@ -178,7 +178,6 @@ def ant_maze():
 
 def pusht():
     pytest.importorskip('gym_pusht')
-    import gym_pusht
     return gym.make('gym_pusht/PushT-v0', render_mode = 'rgb_array')
 
 def dmc_reacher():
@@ -355,7 +354,6 @@ def test_gym_pusht_standardize_env():
 
 def test_gym_pusht_vector_standardize_env():
     pytest.importorskip('gym_pusht')
-    import gym_pusht
     from gymnasium.vector import SyncVectorEnv
 
     try:

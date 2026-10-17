@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
-import gymnasium as gym
 
 from env_ssl_wrapper import (
     MultiprocessingVecEnv,
@@ -131,6 +129,23 @@ def test_sgs_sampler_applies_the_eps_floor_and_temperature():
     cool = SGSSampler(configs, target = 0.5, kappa = 4., eps = 0.1, temperature = 0.01, seed = 0)
     cool.update([0, 1, 2], [1., 0.5, 0.])
     assert torch.allclose(cool.probs, floored / floored.sum(), atol = 1e-6)
+
+def test_sgs_add_config_invalidates_cached_statistics():
+    sampler = SGSSampler([np.array([0.]), np.array([1.])], seed = 0)
+    sampler.update([0], [1.])
+
+    # materialize the caches, then grow the bank
+
+    assert sampler.success_rates.shape == (2,)
+    assert sampler.probs.shape == (2,)
+
+    idx = sampler.add_config(np.array([2.]), init_p = 0.5)
+
+    assert idx == 2
+    assert sampler.counts[-1] == 1
+    assert sampler.success_rates.shape == (3,)
+    assert sampler.success_rates[-1] == 0.5
+    assert sampler.probs.shape == (3,)
 
 def test_sgs_sampler_custom_hooks_and_schedules():
     configs = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]

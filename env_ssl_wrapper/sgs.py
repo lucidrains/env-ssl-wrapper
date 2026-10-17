@@ -415,6 +415,7 @@ class SGSSampler:
         self.configs.append(copy_leaf(config))
         self.history.append(deque([float(init_p)], maxlen = self.window) if exists(init_p) else deque(maxlen = self.window))
         self.counts = torch.cat([self.counts, torch.tensor([exists(init_p)], dtype = torch.long)])
+        self._version += 1  # invalidate cached rates / weights / probs -> new bank size
         return idx
 
 # wrapper

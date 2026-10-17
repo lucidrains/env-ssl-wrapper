@@ -11,7 +11,6 @@ from env_ssl_wrapper import (
     TensorWrapper,
     compose_env
 )
-from env_ssl_wrapper.helpers import env_num_envs
 from env_ssl_wrapper.mocks import (
     BraxMockEnv,
     HabitatMockEnv,
@@ -43,8 +42,6 @@ def sample_actions(batch_size, action_space):
 
 @pytest.mark.parametrize('env', NONSTANDARD_ENVS, ids = lambda env: type(env).__name__)
 def test_nonstandard_rollout_contract(env):
-    num_envs = env_num_envs(env)
-
     env = compose_env(
         env,
         'auto_batch',

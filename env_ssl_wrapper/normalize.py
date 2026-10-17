@@ -12,6 +12,7 @@ except ImportError:
 
 from .standardize.helpers import (
     EnvWrapper,
+    FINAL_OBSERVATION_MASK_KEYS,
     TransformObservationWrapper,
     cast_tuple,
     default,
@@ -257,7 +258,7 @@ def combine_moments(moments, shape = (), prior_count = 0., eps = 1e-8, dtype = t
     # stripped, real sample moments merged, one pseudo count added back at the end, so the result
     # is what a single process seeing every rank's samples would have
 
-    out = RunningMeanStd(shape = shape, eps = eps, prior_count = prior_count)
+    out = RunningMeanStd(shape = shape, eps = eps, prior_count = prior_count, dtype = dtype, device = device)
 
     for count, mean, m2 in moments:
         count = float(count)
@@ -265,9 +266,6 @@ def combine_moments(moments, shape = (), prior_count = 0., eps = 1e-8, dtype = t
         if count > 0.:
             out.merge_moments(mean, m2 / count, count)
 
-    out.mean = out.mean.to(dtype = dtype, device = device)
-    out.var = out.var.to(dtype = dtype, device = device)
-    out.dtype, out.device = dtype, device
     return out
 
 def combine_accumulators(accumulators, prior_count = 0., eps = 1e-8, dtype = torch.float64, device = None):
@@ -381,23 +379,21 @@ class StateNormalizationWrapper(TransformObservationWrapper):
         assert key in self.stats, f'no statistics for key {key!r} yet'
         return self.stats[key]
 
-    def mean(self, key = None):
+    def _map_stats(self, key, fn):
+        # no key + multiple tracked leaves -> the values keyed by obs key
         if not exists(key) and len(self.stats) > 1:
-            return {k: s.mean.clone() for k, s in self.stats.items()}
+            return {k: fn(stats) for k, stats in self.stats.items()}
 
-        return self.stats_of(key).mean.clone()
+        return fn(self.stats_of(key))
+
+    def mean(self, key = None):
+        return self._map_stats(key, lambda stats: stats.mean.clone())
 
     def std(self, key = None):
-        if not exists(key) and len(self.stats) > 1:
-            return {k: s.std.clone() for k, s in self.stats.items()}
-
-        return self.stats_of(key).std.clone()
+        return self._map_stats(key, lambda stats: stats.std.clone())
 
     def count(self, key = None):
-        if not exists(key) and len(self.stats) > 1:
-            return {k: s.count for k, s in self.stats.items()}
-
-        return self.stats_of(key).count
+        return self._map_stats(key, lambda stats: stats.count)
 
     # obs plumbing
 
@@ -490,7 +486,7 @@ class StateNormalizationWrapper(TransformObservationWrapper):
             targets[key].update(rows)
 
     def _final_obs_mask(self, info, batch, newly_done):
-        for key in ('_final_observation', '_final_obs'):
+        for key in FINAL_OBSERVATION_MASK_KEYS:
             if isinstance(info, dict) and exists(info.get(key)):
                 return newly_done & to_bool_array(info[key], batch)
 

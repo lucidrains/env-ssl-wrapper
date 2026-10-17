@@ -29,6 +29,29 @@ from env_ssl_wrapper.mocks import (
 
 # 1. MultiprocessingVecEnv tests
 
+class LazySpaceMockEnv:
+    # gymnasium-style spaces only exist after the first reset
+
+    action_space = None
+    observation_space = None
+
+    def reset(self):
+        self.action_space = Space((2,), -1., 1.)
+        self.observation_space = Space((4,))
+        return np.zeros(4), {}
+
+    def step(self, action):
+        return np.zeros(4), 1.0, False, False, {}
+
+def test_multiprocessing_vec_env_lazy_spaces():
+    with MultiprocessingVecEnv(LazySpaceMockEnv, num_envs = 2) as env:
+        assert env.action_space is None and env.observation_space is None
+
+        env.reset()
+
+        assert env.action_space is not None and env.action_dim == 2
+        assert env.observation_space is not None and env.obs_dim == 4
+
 def test_multiprocessing_vec_env_single():
     with MultiprocessingVecEnv(GymnasiumMockEnv, num_envs = 1, seed = 42) as env:
         assert env.num_envs == 1

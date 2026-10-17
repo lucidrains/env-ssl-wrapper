@@ -149,7 +149,6 @@ def test_auto_rescale_vectorized_batch():
 
 def test_time_limit_vectorized():
     from env_ssl_wrapper.mocks import AutoresetVectorMockEnv
-    from env_ssl_wrapper.done_tracker_wrapper import DoneTrackerWrapper
 
     env = compose_env_for_time_limit(AutoresetVectorMockEnv(), 5)
 
@@ -164,7 +163,6 @@ def test_time_limit_vectorized():
 
 def test_time_limit_single():
     from env_ssl_wrapper.mocks import GymnasiumMockEnv
-    from env_ssl_wrapper.done_tracker_wrapper import DoneTrackerWrapper
 
     env = compose_env_for_time_limit(GymnasiumMockEnv(), 10)
 

@@ -65,7 +65,6 @@ from env_ssl_wrapper import (
     SuccessGuidedSamplingWrapper,
     uniform_score_fn,
 )
-from env_ssl_wrapper.helpers import divisible_by
 
 # lunar lander with reset-to-state
 #
@@ -667,6 +666,10 @@ def render_landings(actor, info, run_dir, num_landings = 4):
     scored = [record_landing(actor, state, render = False)['success'] for state in bank]
     landed_indices = [i for i, ok in enumerate(scored) if ok]
     print(f'best SGS policy (seed {info["seed"]}) lands {len(landed_indices)}/{len(bank)} bank states greedily')
+
+    if not landed_indices:
+        print('no bank states landed - skipping renders')
+        return
 
     landings = []
 

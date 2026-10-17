@@ -309,9 +309,15 @@ class MultiprocessingVecEnv:
 
         results = recv_all(self._conns)
 
+        # spaces may be filled in lazily by the worker on its first reset
+
         if not exists(self.observation_space):
             self.observation_space = self._get_attr('observation_space')
             self.obs_dim = default(self.obs_dim, obs_dim_of(self))
+
+        if not exists(self.action_space):
+            self.action_space = self._get_attr('action_space')
+            self.action_dim = default(self.action_dim, action_dim_of(self))
 
         return stack_trees([obs for obs, _ in results]), merge_infos([info for _, info in results])
 

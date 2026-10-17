@@ -220,7 +220,7 @@ uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts matc
 
 ### Time & Past Action
 
-Two small wrappers that append temporal context to the observation — the step index, and the action that led into the current state.
+Two small wrappers that append temporal context to the observation — the step index, and the actions that led into the current state.
 
 ```python
 import gymnasium as gym
@@ -246,15 +246,25 @@ env = TimeWrapper(env, transform = lambda t: t.float())   # raw floats
 env = PastActionsWrapper(env, key = 'prev_action', first_action = None)
 ```
 
-Keep everything tensor-valued with `has_past_actions_key` — the first step emits zeros, and a `Bool[num_envs]` field says which slots actually have a past action (this is what `PastActionEncoder` from `x-mlps-pytorch` reads):
+Keep everything tensor-valued with `has_past_actions_key` — the first step emits zeros, and a `Bool[num_envs]` field says which slots actually have a past action (this is what `DiscretePastActions` from `x-mlps-pytorch` reads for a single past action):
 
 ```python
 env = PastActionsWrapper(env, has_past_actions_key = 'has_past_actions')   # obs['has_past_actions'] -> (num_envs,) bools
 ```
 
+Keep more than one action with `num_past_actions` — the history keeps the last n actions, oldest first, in a trailing axis. The most recent action is `[..., -1]`, and `has_past_actions` grows the same axis:
+
+```python
+env = PastActionsWrapper(env, num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+# obs['past_action']       -> (num_envs, 2) discrete, or (num_envs, 2, *action_shape) continuous
+# obs['has_past_actions']  -> (num_envs, 2) bools, False until each slot is filled
+```
+
+The default `num_past_actions = 1` keeps the original observation shape.
+
 Both wrappers track the batch slot by slot — an env that autoresets mid-rollout gets a fresh value — and both attach to the terminal `info['final_observation']` like the rest of the library.
 
-Run the CartPole demo — the one-hot last action fed back in, against a zeros control, same learner, seed and budget:
+Run the CartPole demo — the last action fed back in, against a zeros control, same learner, seed and budget:
 
 ```bash
 uv run train_cartpole.py    # both arms converge to a perfect greedy 500.0
@@ -321,7 +331,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
 | `time` | Supplies the per-episode timestep. `('time', dict(transform = fourier_time))` |
-| `past_action` | Supplies the last action. `('past_action', dict(first_action = None))` |
+| `past_action` | Supplies the last action, or the last n with `num_past_actions`. `('past_action', dict(num_past_actions = 2))` |
 | `state_norm` | Running mean / std normalization of states, live or deferred until the learner updates. `('state_norm', dict(update_mode = 'deferred'))` |
 | `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(reset_configs = configs, target = 0.5, kappa = 2.))` |
 

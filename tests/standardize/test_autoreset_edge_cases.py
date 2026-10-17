@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from env_ssl_wrapper import StandardizeEnvWrapper, compose_env
+from env_ssl_wrapper import StandardizeEnvWrapper
 from env_ssl_wrapper.standardize.auto_batched_wrapper import AutoBatchedWrapper
 
 def test_standardize_env_vector_skips_autobatch():

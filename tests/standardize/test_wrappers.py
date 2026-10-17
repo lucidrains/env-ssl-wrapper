@@ -84,7 +84,5 @@ def test_compose_with_wrapper_classes():
 # a bare kwargs dict (not wrapped in a tuple) fails with a clear message
 
 def test_compose_bare_kwargs_dict_raises():
-    from env_ssl_wrapper import TensorWrapper
-
     with pytest.raises(ValueError, match = '\(name, kwargs\)'):
         compose_env(gym.make('CartPole-v1'), dict(device = 'cpu'))
