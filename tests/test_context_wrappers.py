@@ -4,6 +4,7 @@ import torch
 import env_ssl_wrapper
 from env_ssl_wrapper import (
     PastActionsWrapper,
+    PastStatesWrapper,
     StandardizeEnvWrapper,
     TimeWrapper,
     compose_env,
@@ -409,8 +410,326 @@ def test_past_action_two_actions_with_compose_env():
     assert obs['past_action'].shape == (1, 2)
     assert obs['has_past_actions'].tolist() == [[False, False]]
 
+def test_past_action_specific_lags():
+    class MockLongActionEnv:
+        action_space = DiscreteSpace(10)
+
+        def reset(self, **kwargs):
+            return torch.zeros(2), {}
+
+        def step(self, action):
+            return torch.zeros(2), 1., torch.tensor(False), torch.tensor(False), {}
+
+    env = PastActionsWrapper(MockLongActionEnv(), num_past_actions = (1, 2, 4, 8), has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert env.lags == (8, 4, 2, 1)
+    assert obs['past_action'].shape == (4,)
+    assert obs['has_past_actions'].tolist() == [[False, False, False, False]]
+
+    for step in range(1, 9):
+        obs, *_ = env.step(torch.tensor(step - 1))
+
+        expected_mask = [step >= lag for lag in (8, 4, 2, 1)]
+        assert obs['has_past_actions'].tolist() == [expected_mask]
+
+        for i, lag in enumerate((8, 4, 2, 1)):
+            expected = step - lag if step >= lag else 0
+            assert obs['past_action'][i].item() == expected
+
+def test_past_action_specific_lags_box_shape():
+    class MockBoxEnv:
+        action_space = Space((2,))
+
+        def reset(self, **kwargs):
+            return torch.zeros(3), {}
+
+        def step(self, action):
+            return torch.zeros(3), 1., torch.tensor(False), torch.tensor(False), {}
+
+    env = PastActionsWrapper(MockBoxEnv(), num_past_actions = (1, 4), has_past_actions_key = 'has_past_actions')
+    obs, _ = env.reset()
+
+    assert env.lags == (4, 1)
+    assert obs['past_action'].shape == (2, 2)
+    assert obs['has_past_actions'].tolist() == [[False, False]]
+
+    obs, *_ = env.step(torch.tensor([1., 2.]))
+
+    assert torch.allclose(obs['past_action'], torch.tensor([[0., 0.], [1., 2.]]))
+    assert obs['has_past_actions'].tolist() == [[False, True]]
+
+def test_past_action_lag_validation():
+    with pytest.raises(AssertionError):
+        PastActionsWrapper(MockEnv(), num_past_actions = ())
+
+    with pytest.raises(AssertionError):
+        PastActionsWrapper(MockEnv(), num_past_actions = (0, 1))
+
+    with pytest.raises(AssertionError):
+        PastActionsWrapper(MockEnv(), num_past_actions = (1, 1))
+
+def test_past_action_specific_lags_with_compose_env():
+    import gymnasium as gym
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        'auto_batch',
+        ('past_action', dict(num_past_actions = (1, 2, 4, 8), has_past_actions_key = 'has_past_actions')),
+    )
+    obs, _ = env.reset()
+
+    assert obs['past_action'].shape == (1, 4)
+    assert obs['has_past_actions'].tolist() == [[False, False, False, False]]
+
+    obs, *_ = env.step(torch.tensor(0))
+
+    assert obs['has_past_actions'].tolist() == [[False, False, False, True]]
+
+# past states
+
+def test_past_state_zeros_first_step():
+    env = PastStatesWrapper(MockEnv())
+    obs, _ = env.reset()
+
+    assert obs['past_state'].dtype == torch.float32
+    assert obs['past_state'].tolist() == [0., 0.]
+
+    obs, *_ = env.step(torch.tensor(1))
+    # the state before the step was the reset state
+    assert obs['past_state'].tolist() == [0., 0.]
+
+    obs, *_ = env.step(torch.tensor(1))
+    # now it is the state returned by the previous step
+    assert obs['past_state'].tolist() == [1., 1.]
+
+    # the current state stays in obs['obs']
+    assert obs['obs'].tolist() == [2., 2.]
+
+def test_past_state_none_first_step():
+    env = PastStatesWrapper(MockEnv(), first_state = None)
+    obs, _ = env.reset()
+
+    assert obs['past_state'] is None
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_state'].tolist() == [0., 0.]
+
+def test_past_state_invalid_first_state():
+    with pytest.raises(AssertionError):
+        PastStatesWrapper(MockEnv(), first_state = 'ones')
+
+    with pytest.raises(AssertionError):
+        PastStatesWrapper(MockEnv(), num_past_states = 0)
+
+def test_past_state_two_states():
+    env = PastStatesWrapper(MockEnv(), num_past_states = 2, has_past_states_key = 'has_past_states')
+    obs, _ = env.reset()
+
+    assert obs['past_state'].tolist() == [[0., 0.], [0., 0.]]
+    assert obs['has_past_states'].tolist() == [[False, False]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_state'].tolist() == [[0., 0.], [0., 0.]]
+    assert obs['has_past_states'].tolist() == [[False, True]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_state'].tolist() == [[0., 0.], [1., 1.]]
+    assert obs['has_past_states'].tolist() == [[True, True]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_state'].tolist() == [[1., 1.], [2., 2.]]
+
+def test_past_state_two_states_vector_autoreset():
+    env = PastStatesWrapper(MockAutoresetVecEnv(), num_past_states = 2, has_past_states_key = 'has_past_states')
+    obs, _ = env.reset()
+
+    assert obs['past_state'].tolist() == [[[0., 0.], [0., 0.]], [[0., 0.], [0., 0.]]]
+
+    obs, *_ = env.step(torch.tensor([1, 1]))
+    # slot 0 autoresets -> cleared, slot 1 -> [padding, its reset state]
+    assert obs['past_state'].tolist() == [[[0., 0.], [0., 0.]], [[0., 0.], [0., 0.]]]
+    assert obs['has_past_states'].tolist() == [[False, False], [False, True]]
+
+    obs, *_ = env.step(torch.tensor([0, 1]))
+    # both slots append the state returned by the previous step
+    assert obs['past_state'].tolist() == [[[0., 0.], [10., 10.]], [[0., 0.], [10., 10.]]]
+    assert obs['has_past_states'].tolist() == [[False, True], [True, True]]
+
+def test_past_state_final_observation():
+    env = PastStatesWrapper(MockFinalObsEnv(), num_past_states = 2, has_past_states_key = 'has_past_states')
+    env.reset()
+    env.step(torch.tensor(1))
+
+    obs, _, terminated, _, info = env.step(torch.tensor(0))
+
+    assert terminated
+    assert obs['past_state'].tolist() == [[0., 0.], [1., 1.]]
+    assert info['final_observation']['past_state'].tolist() == [[0., 0.], [1., 1.]]
+    assert info['final_observation']['has_past_states'].tolist() == [[True, True]]
+
+def test_past_state_dict_obs_key():
+    class MockDictEnv:
+        action_space = DiscreteSpace(2)
+
+        def reset(self, **kwargs):
+            return {'state': torch.zeros(2), 'image': torch.ones(3)}, {}
+
+        def step(self, action):
+            t = torch.tensor([1., 2.])
+            return {'state': t, 'image': torch.ones(3)}, 1., torch.tensor(False), torch.tensor(False), {}
+
+    env = PastStatesWrapper(MockDictEnv(), obs_key = 'state', num_past_states = 2)
+    obs, _ = env.reset()
+
+    assert set(obs.keys()) == {'state', 'image', 'past_state'}
+    assert obs['past_state'].tolist() == [[0., 0.], [0., 0.]]
+
+    obs, *_ = env.step(torch.tensor(1))
+    assert obs['past_state'].tolist() == [[0., 0.], [0., 0.]]
+    assert obs['state'].tolist() == [1., 2.]
+
+def test_past_state_missing_dict_key():
+    class MockDictEnv:
+        def reset(self, **kwargs):
+            return {'state': torch.zeros(2)}, {}
+
+    with pytest.raises(KeyError):
+        PastStatesWrapper(MockDictEnv(), obs_key = 'obs').reset()
+
+# configurable history lengths
+
+@pytest.mark.parametrize('num_past_states', [1, 2, 4, 8])
+def test_past_state_custom_history_sizes(num_past_states):
+    env = PastStatesWrapper(MockEnv(), num_past_states = num_past_states, has_past_states_key = 'has_past_states')
+    obs, _ = env.reset()
+
+    expected_shape = (2,) if num_past_states == 1 else (num_past_states, 2)
+
+    assert obs['past_state'].shape == expected_shape
+    assert not obs['has_past_states'].any()
+
+    for step in range(1, num_past_states + 1):
+        prev_state = obs['obs'].clone()
+        obs, *_ = env.step(torch.tensor(1))
+
+        assert obs['past_state'].shape == expected_shape
+        assert obs['has_past_states'].sum().item() == min(step, num_past_states)
+
+        if num_past_states == 1:
+            assert torch.allclose(obs['past_state'], prev_state)
+        else:
+            assert torch.allclose(obs['past_state'][-1], prev_state)
+
+    assert obs['has_past_states'].all()
+
+def test_past_state_specific_lags():
+    env = PastStatesWrapper(MockEnv(), num_past_states = (1, 2, 4, 8), has_past_states_key = 'has_past_states')
+    obs, _ = env.reset()
+
+    assert env.lags == (8, 4, 2, 1)
+    assert obs['past_state'].shape == (4, 2)
+    assert obs['has_past_states'].tolist() == [[False, False, False, False]]
+
+    for step in range(1, 9):
+        obs, *_ = env.step(torch.tensor(1))
+
+        expected_mask = [step >= lag for lag in (8, 4, 2, 1)]
+        assert obs['has_past_states'].tolist() == [expected_mask]
+
+        for i, lag in enumerate((8, 4, 2, 1)):
+            expected = torch.full((2,), float(step - lag)) if step >= lag else torch.zeros(2)
+            assert torch.allclose(obs['past_state'][i], expected)
+
+def test_past_state_lag_validation():
+    with pytest.raises(AssertionError):
+        PastStatesWrapper(MockEnv(), num_past_states = ())
+
+    with pytest.raises(AssertionError):
+        PastStatesWrapper(MockEnv(), num_past_states = (0, 1))
+
+    with pytest.raises(AssertionError):
+        PastStatesWrapper(MockEnv(), num_past_states = (1, 1))
+
+def test_past_state_specific_lags_with_compose_env():
+    import gymnasium as gym
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        'auto_batch',
+        ('past_state', dict(num_past_states = (1, 2, 4, 8), has_past_states_key = 'has_past_states')),
+    )
+    obs, _ = env.reset()
+
+    assert obs['past_state'].shape == (1, 4, 4)
+    assert obs['has_past_states'].tolist() == [[False, False, False, False]]
+
+    obs, *_ = env.step(torch.tensor(0))
+
+    assert obs['has_past_states'].tolist() == [[False, False, False, True]]
+
+def test_past_state_with_standardize_wrapper():
+    import gymnasium as gym
+
+    env = PastStatesWrapper(
+        StandardizeEnvWrapper(gym.make('CartPole-v1')),
+        num_past_states = 4,
+        has_past_states_key = 'has_past_states',
+    )
+    obs, _ = env.reset()
+
+    assert set(obs.keys()) == {'obs', 'past_state', 'has_past_states'}
+    assert obs['past_state'].shape == (1, 4, 4)
+    assert obs['has_past_states'].tolist() == [[False, False, False, False]]
+
+    prev_state = obs['obs'].clone()
+    obs, *_ = env.step(torch.tensor(0))
+
+    assert torch.allclose(obs['past_state'][0, -1], prev_state[0])
+    assert obs['has_past_states'].tolist() == [[False, False, False, True]]
+
+def test_past_action_and_state_together():
+    import gymnasium as gym
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        'auto_batch',
+        ('past_action', dict(num_past_actions = 4)),
+        ('past_state', dict(num_past_states = 4)),
+    )
+    obs, _ = env.reset()
+
+    assert set(obs.keys()) == {'obs', 'past_action', 'past_state'}
+    assert obs['past_action'].shape == (1, 4)
+    assert obs['past_state'].shape == (1, 4, 4)
+
+    obs, *_ = env.step(torch.tensor(1))
+
+    assert obs['past_action'].tolist() == [[0, 0, 0, 1]]
+    assert obs['past_state'].shape == (1, 4, 4)
+
+def test_past_action_and_state_lags_together():
+    import gymnasium as gym
+
+    env = compose_env(
+        gym.make('CartPole-v1'),
+        'auto_batch',
+        ('past_action', dict(num_past_actions = (1, 2, 4, 8))),
+        ('past_state', dict(num_past_states = (1, 2, 4, 8))),
+    )
+    obs, _ = env.reset()
+
+    assert set(obs.keys()) == {'obs', 'past_action', 'past_state'}
+    assert obs['past_action'].shape == (1, 4)
+    assert obs['past_state'].shape == (1, 4, 4)
+
 # exports
 
 def test_context_all_export():
-    for name in ('TimeWrapper', 'PastActionsWrapper', 'fourier_time'):
+    for name in (
+        'TimeWrapper',
+        'PastActionsWrapper',
+        'PastStatesWrapper',
+        'fourier_time',
+    ):
         assert name in env_ssl_wrapper.__all__

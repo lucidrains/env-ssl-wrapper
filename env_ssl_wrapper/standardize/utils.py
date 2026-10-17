@@ -46,6 +46,10 @@ def get_wrapper(name):
         from ..context import PastActionsWrapper
         return PastActionsWrapper
 
+    if name in ('past_state', 'past_states'):
+        from ..context import PastStatesWrapper
+        return PastStatesWrapper
+
     if name in ('sgs', 'success_guided_sampling'):
         from ..sgs import SuccessGuidedSamplingWrapper
         return SuccessGuidedSamplingWrapper
@@ -57,7 +61,7 @@ def get_wrapper(name):
     if name in WRAPPERS:
         return WRAPPERS[name]
 
-    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "sgs", "state_norm", "standardize_env"])}')
+    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "past_state", "sgs", "state_norm", "standardize_env"])}')
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):

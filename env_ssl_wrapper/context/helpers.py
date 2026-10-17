@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from numbers import Integral
+
 import torch
 from torch import is_tensor
 from torch.utils._pytree import tree_flatten
@@ -7,6 +9,39 @@ from torch.utils._pytree import tree_flatten
 from ..standardize.helpers import exists
 
 # helpers
+
+def parse_history_lags(value, name = 'history'):
+    # int -> dense window of the last n entries; sequence -> only those lags
+
+    if isinstance(value, Integral):
+        num = int(value)
+        assert num >= 1, f'{name} must be at least 1, got {num}'
+
+        return None, num
+
+    lags = tuple(int(lag) for lag in value)
+
+    assert lags, f'{name} must not be empty'
+    assert all(lag >= 1 for lag in lags), f'{name} lags must be at least 1, got {lags}'
+    assert len(set(lags)) == len(lags), f'{name} lags must be unique, got {lags}'
+
+    return tuple(sorted(lags, reverse = True)), max(lags)
+
+def select_history_lags(history, mask, lags, history_len):
+    # internal history is oldest first, so lag l sits at history_len - l
+
+    if not exists(lags):
+        return history, mask
+
+    indices = [history_len - lag for lag in lags]
+
+    if exists(history):
+        history = history[:, indices]
+
+    if exists(mask):
+        mask = mask[:, indices]
+
+    return history, mask
 
 def obs_device(obs):
     leaves, _ = tree_flatten(obs)

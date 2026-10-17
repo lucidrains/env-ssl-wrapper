@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 from torch import is_tensor
 
@@ -17,7 +19,7 @@ from ..standardize.helpers import (
     normalize_step_out,
 )
 from ..standardize.spaces import action_space_is_discrete
-from .helpers import attach_obs, done_mask, obs_device
+from .helpers import attach_obs, done_mask, obs_device, parse_history_lags, select_history_lags
 
 # helpers
 
@@ -45,6 +47,9 @@ class PastActionsWrapper(TransformObservationWrapper):
     unchanged. With `num_past_actions = 2` a discrete history is `(num_envs, 2)` and a
     continuous one is `(num_envs, 2, *action_shape)`.
 
+    `num_past_actions` can also be a sequence of lags to keep only those actions — e.g.
+    `(1, 2, 4, 8)` keeps four actions, at lags 8, 4, 2, 1.
+
     The first step of an episode (a reset, or a fresh autoreset slot) has no past action:
     missing entries are zeros, or `None` when `first_action = None` and the whole history is
     empty. When only some slots of a batch are fresh — a batched tensor cannot hold `None` —
@@ -64,17 +69,20 @@ class PastActionsWrapper(TransformObservationWrapper):
         first_action = 'zeros',
         obs_key: str = 'obs',
         has_past_actions_key: str | None = None,
-        num_past_actions: int = 1,
+        num_past_actions: int | Sequence[int] = 1,
     ):
         super().__init__(env)
         assert first_action in ('zeros', None), "first_action must be 'zeros' or None"
-        assert num_past_actions >= 1, f'num_past_actions must be at least 1, got {num_past_actions}'
+
+        lags, history_len = parse_history_lags(num_past_actions, 'num_past_actions')
 
         self.key = key
         self.first_action = first_action
         self.obs_key = obs_key
         self.has_past_actions_key = has_past_actions_key
-        self.num_past_actions = int(num_past_actions)
+        self.lags = lags
+        self.num_past_actions = len(lags) if exists(lags) else history_len
+        self.history_len = history_len
 
         self.num_envs = env_num_envs(env)
         self.vectorized = is_vectorized(env)
@@ -84,7 +92,7 @@ class PastActionsWrapper(TransformObservationWrapper):
         self.history = None
         self.history_mask = None
 
-    # batched so the state is (num_envs, num_past_actions, *action_shape)
+    # batched so the state is (num_envs, history_len, *action_shape)
 
     def _batch_action(self, action):
         if not exists(action):
@@ -101,11 +109,13 @@ class PastActionsWrapper(TransformObservationWrapper):
         if not exists(action):
             return None
 
-        padding = action.unsqueeze(1).expand(-1, self.num_past_actions, *action.shape[1:]).clone()
+        padding = action.unsqueeze(1).expand(-1, self.history_len, *action.shape[1:]).clone()
         return padding
 
     def _format_history(self, history = None, mask = None):
         # internal batch first -> the single-env shapes this wrapper has always emitted
+
+        history, mask = select_history_lags(history, mask, self.lags, self.history_len)
 
         if self.num_past_actions == 1:
             if exists(history):
@@ -135,10 +145,10 @@ class PastActionsWrapper(TransformObservationWrapper):
             mask = torch.cat((self.history_mask[:, 1:], present[:, None]), dim = 1)
             return history, mask
 
-        padding = action.new_zeros((self.num_envs, self.num_past_actions, *action.shape[1:]))
+        padding = action.new_zeros((self.num_envs, self.history_len, *action.shape[1:]))
         history = torch.cat((padding[:, 1:], action[:, None]), dim = 1)
 
-        mask = torch.zeros(self.num_envs, self.num_past_actions, dtype = torch.bool)
+        mask = torch.zeros(self.num_envs, self.history_len, dtype = torch.bool)
         mask[:, -1] = present
         return history, mask
 
@@ -160,7 +170,7 @@ class PastActionsWrapper(TransformObservationWrapper):
 
     def reset(self, **kwargs):
         self.history = self.zero_history.clone() if exists(self.zero_history) else None
-        self.history_mask = torch.zeros(self.num_envs, self.num_past_actions, dtype = torch.bool)
+        self.history_mask = torch.zeros(self.num_envs, self.history_len, dtype = torch.bool)
         return super().reset(**kwargs)
 
     def transform_obs(self, obs, done = None):
