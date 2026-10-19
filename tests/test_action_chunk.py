@@ -333,7 +333,10 @@ def test_action_chunk_wrong_chunk_length():
         env.step(np.zeros((1, 3), dtype = int))
 
     with pytest.raises(AssertionError):
-        env.step(np.zeros(2, dtype = int))
+        env.step(np.zeros(3, dtype = int))
+
+    with pytest.raises(AssertionError):
+        env.step(np.zeros((2, 2), dtype = int))
 
 # plain single environments — no auto-batching in the stack
 
@@ -381,6 +384,39 @@ def test_action_chunk_plain_env_matches_per_step():
     assert abs(float(np.sum(reward)) - expected_reward) < 1e-6
     assert not bool(terminated) and not bool(truncated)
 
+def test_action_chunk_plain_single_env_unbatched_chunk():
+    env = ActionChunkWrapper(gym.make('CartPole-v1'), chunk_len = 2)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(np.array([0, 1]))
+
+    assert obs.shape == (4,)
+    assert info['chunk_length'] == 2
+    assert info['chunk_rewards'].shape == (2,)
+    assert float(np.sum(reward)) == 2.
+
+def test_action_chunk_plain_single_env_unbatched_box_chunk():
+    env = ActionChunkWrapper(gym.make('Pendulum-v1'), chunk_len = 2)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((2, 1)))
+
+    assert obs.shape == (3,)
+    assert info['chunk_length'] == 2
+    assert info['chunk_rewards'].shape == (2,)
+
+@pytest.mark.parametrize('use_torch', [False, True])
+def test_action_chunk_plain_single_env_single_action(use_torch):
+    env = ActionChunkWrapper(gym.make('Pendulum-v1'), chunk_len = 1)
+    env.reset(seed = 0)
+
+    action = torch.zeros(1) if use_torch else np.zeros(1, dtype = np.float32)
+    obs, reward, terminated, truncated, info = env.step(action)
+
+    assert obs.shape == (3,)
+    assert info['chunk_length'] == 1
+    assert info['chunk_rewards'].shape == (1,)
+
 @pytest.mark.parametrize('chunk_len', [1, 2, 6])
 def test_action_chunk_plain_single_env_torch_matches_numpy(chunk_len):
     seed = 0
@@ -427,6 +463,24 @@ def test_action_chunk_raw_vector_env(num_envs, use_torch):
         assert info['chunk_length'] == 3
         assert info['chunk_rewards'].shape == (num_envs, 3)
         assert np.allclose(reward, [3.] * num_envs)
+    finally:
+        env.close()
+
+@pytest.mark.parametrize('num_envs', [1, 3])
+def test_action_chunk_raw_vector_env_chunk_len_one(num_envs):
+    env = ActionChunkWrapper(gym.vector.SyncVectorEnv([lambda: gym.make('CartPole-v1') for _ in range(num_envs)]), chunk_len = 1)
+
+    try:
+        obs, _ = env.reset(seed = 0)
+        assert obs.shape == (num_envs, 4)
+
+        obs, reward, terminated, truncated, info = env.step(np.zeros(num_envs, dtype = int))
+
+        assert obs.shape == (num_envs, 4)
+        assert reward.shape == (num_envs,)
+        assert terminated.shape == (num_envs,)
+        assert info['chunk_length'] == 1
+        assert info['chunk_rewards'].shape == (num_envs, 1)
     finally:
         env.close()
 

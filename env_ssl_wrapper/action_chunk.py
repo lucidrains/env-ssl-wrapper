@@ -26,32 +26,21 @@ from .standardize.helpers import (
 def stack_steps(steps):
     return torch.stack(steps, dim = -1) if is_tensor(steps[0]) else np.stack(steps, axis = -1)
 
-def chunk_steps(actions, axis):
-    return actions.unbind(dim = axis) if is_tensor(actions) else np.moveaxis(actions, axis, 0)
-
-def unbatch_step(action):
-    # chunks always carry a num_envs axis - drop it for plain single envs
-    if is_tensor(action):
-        action = action.squeeze(0)
-        return action.item() if action.ndim == 0 and not action.is_floating_point() else action
-
-    if isinstance(action, np.ndarray):
-        action = np.squeeze(action, axis = 0) if action.ndim > 0 else action
-        return action.item() if action.ndim == 0 and np.issubdtype(action.dtype, np.integer) else action
-
-    return action
+def chunk_steps(actions):
+    return actions.unbind(dim = 1) if is_tensor(actions) else np.moveaxis(actions, 1, 0)
 
 # wrapper
 
 class ActionChunkWrapper(EnvWrapper):
-    priority = 100
-
     """
     Open-loop action chunking - executes a chunk of actions in one step,
     temporally compressing the environment by the chunk length.
 
-    action chunks are shaped (num_envs, chunk_len, *action_shape)
+    action chunks are shaped (num_envs, chunk_len, *action_shape), with the
+    num_envs axis optional for single envs (AsyncVectorEnv workers drop it)
     """
+
+    priority = 100
 
     def __init__(
         self,
@@ -84,6 +73,33 @@ class ActionChunkWrapper(EnvWrapper):
     def chunk_action_shape(self):
         return (self.chunk_len, *self.action_shape)
 
+    def _normalize_chunk(self, actions):
+        # canonicalize to (num_envs, chunk_len, *action_shape); the num_envs axis
+        # is optional for single envs, and may be omitted entirely when chunk_len == 1
+
+        action_shape = self.action_shape
+        chunk_len = self.chunk_len
+        num_leading = actions.ndim - len(action_shape)
+
+        assert num_leading >= 0 and actions.shape[num_leading:] == action_shape, (
+            f'expected trailing action shape {action_shape}, got {tuple(actions.shape)}'
+        )
+
+        leading = actions.shape[:num_leading]
+
+        if chunk_len == 1 and num_leading < 2:
+            actions = actions.reshape(-1, 1, *action_shape)
+        elif num_leading == 1 and not self.expects_batch:
+            assert leading[0] == chunk_len, f'expected chunk length {chunk_len}, got {leading[0]}'
+            actions = actions[None]
+        else:
+            assert num_leading == 2 and leading[1] == chunk_len, (
+                f'action chunks must be shaped (num_envs, chunk_len, *action_shape) or (chunk_len, *action_shape), got {tuple(actions.shape)}'
+            )
+
+        assert self.expects_batch or actions.shape[0] == 1, 'single env takes one action chunk at a time'
+        return actions
+
     def reset(self, **kwargs):
         return normalize_reset_out(self.env.reset(**kwargs))
 
@@ -99,22 +115,14 @@ class ActionChunkWrapper(EnvWrapper):
         if is_tensor(actions) and self.convert_in:
             actions = to_numpy(actions)
 
-        chunk_axis = actions.ndim - 1 - len(self.action_shape)
-
-        assert chunk_axis >= 1, (
-            f'action chunks must be shaped (num_envs, chunk_len, *action_shape), got {tuple(actions.shape)}'
-        )
-
-        assert actions.shape[chunk_axis] == self.chunk_len, (
-            f'expected chunk length {self.chunk_len}, got {actions.shape[chunk_axis]}'
-        )
+        actions = self._normalize_chunk(actions)
 
         rewards = []
         out = None
 
-        for action in chunk_steps(actions, chunk_axis):
+        for action in chunk_steps(actions):
             if not self.expects_batch:
-                action = unbatch_step(action)
+                action = action[0]
 
             out = normalize_step_out(self.env.step(action))
             rewards.append(copy_leaf(out[1]))

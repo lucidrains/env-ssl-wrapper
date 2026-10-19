@@ -196,7 +196,7 @@ while True:
         obs, info = env.reset()
 ```
 
-Chunks are shaped `(num_envs, chunk_len, *action_shape)` (`(num_envs, chunk_len)` for discrete actions). The wrapper can also be applied directly to raw gymnasium environments, single or vectorized — torch action chunks are converted to numpy for the underlying simulator.
+Chunks are shaped `(num_envs, chunk_len, *action_shape)` (`(num_envs, chunk_len)` for discrete actions), with the `num_envs` axis optional for a single env — which is what `AsyncVectorEnv` workers receive. With `chunk_len = 1`, a bare `(*action_shape)` / `(num_envs, *action_shape)` action is also accepted. The wrapper can also be applied directly to raw gymnasium environments, single or vectorized — torch action chunks are converted to numpy for the underlying simulator.
 
 Execution stops early the moment any env terminates or truncates mid-chunk — the terminal state and done flags of that substep are returned and the rest of the chunk is dropped, so a new episode is never silently advanced.
 
