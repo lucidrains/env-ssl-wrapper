@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+__version__ = '0.6.1'
+
 import sys as _sys
 
 from . import standardize as _standardize
@@ -15,6 +17,8 @@ from .sgs import (
     SGSSampler,
     sgs_score_fn,
     sgs_sample_fn,
+    pooled_success_fn,
+    max_success_fn,
     variance_score_fn,
     uniform_score_fn,
     ladder_frontier_index,

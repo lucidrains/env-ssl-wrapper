@@ -71,6 +71,89 @@ def default_success_fn(obs, reward, terminated, truncated, info):
 
     return terminated
 
+# hierarchical banks
+#
+#   [a, b, c]                       # flat, the paper's bank
+#   [[a, b], [c, d]]                # one group level
+#   [a, [b, c], [[d], e]]           # ragged: leaves and groups are siblings
+#
+# a group is a list / tuple of children, or
+# dict(name = 'easy', success_fn = max_success_fn, kappa = 8., configs = [...])
+#
+# groups are stored bottom up, so a child ref is a leaf if >= 0, else a group
+# (~ref).  branches can sit at different depths - only the root is at the top.
+# a list / tuple config must be wrapped (np.array or callable) or it reads as a group.
+
+_GROUP_SCORE_HPARAMS = ('target', 'kappa', 'eps', 'unvisited_weight')
+
+def _child_value(ref, leaves, groups):
+    return leaves[ref] if ref >= 0 else groups[~ref]
+
+def pooled_success_fn(child_rates, child_counts = None, **kwargs):
+    """Count-weighted mean of child success rates."""
+
+    rates = np.asarray(child_rates, dtype = float)
+    mask = ~np.isnan(rates)
+    if not mask.any():
+        return float('nan')
+    if child_counts is None:
+        return float(rates[mask].mean())
+
+    counts = np.asarray(child_counts, dtype = float)
+    total = counts[mask].sum()
+    return float((rates[mask] * counts[mask]).sum() / total) if total > 0. else float(rates[mask].mean())
+
+def max_success_fn(child_rates, **kwargs):
+    # group succeeds if any child does - the optimist's pooling
+
+    rates = np.asarray(child_rates, dtype = float)
+    return float(np.nanmax(rates)) if not np.all(np.isnan(rates)) else float('nan')
+
+def _is_group(spec):
+    return isinstance(spec, (list, tuple)) or (isinstance(spec, dict) and 'configs' in spec)
+
+def _parse_bank(spec):
+    # nested spec -> (leaves, groups), groups bottom up (children before parents)
+
+    leaves, groups = [], []
+
+    def parse(node, is_root = False):
+        if not _is_group(node):
+            leaves.append(node)
+            return len(leaves) - 1
+
+        is_dict = isinstance(node, dict)
+        children = node['configs'] if is_dict else node
+        assert len(children) > 0, 'a group must have at least one child'
+
+        refs = [parse(child) for child in children]
+        depth = 1 + max(0 if ref >= 0 else groups[~ref]['depth'] for ref in refs)
+        index = len(groups)
+        name = node.get('name') if is_dict else None
+        hparams = dict() if not is_dict else dict(
+            (key, node[key]) for key in _GROUP_SCORE_HPARAMS if node.get(key) is not None
+        )
+
+        groups.append(dict(
+            children = refs,
+            name = name or ('root' if is_root else f'group_{index}'),
+            success_fn = node.get('success_fn') if is_dict else None,
+            hparams = hparams,
+            depth = depth,
+        ))
+        return ~index
+
+    root = parse(spec, is_root = True)
+    if root >= 0:  # a lone leaf still hangs off a root group
+        groups.append(dict(
+            children = [root], name = 'root', success_fn = None,
+            hparams = dict(), depth = 1,
+        ))
+
+    names = [group['name'] for group in groups]
+    assert len(names) == len(set(names)), 'group names must be unique'
+    return leaves, groups
+
 # curriculum score functions
 # Success-Guided Sampling (SGS) - Octi Zhang et al.
 # https://arxiv.org/abs/2610.12465
@@ -325,13 +408,23 @@ class SGSSampler:
     each is handed, by name, whatever it declares of `p`, `counts`, `history`, `configs`,
     `weights`, `probs`, `rng`, `size`, `step`, `window` and the hparams.
 
+    A bank may be nested to any depth, and a group may mix leaves with groups
+    (`[a, [b, c], [[d], e]]` is one ragged tree).  A group's rate is pooled from
+    its children by `group_success_fn` (default `pooled_success_fn`) or its own
+    `success_fn`.  A group may also override `target`, `kappa`, `eps` or
+    `unvisited_weight` for its outgoing group edges.  `score_fn` shapes leaves,
+    `group_score_fn` shapes group-to-group routing.  Weights multiply along each
+    root-to-leaf path, so sampling is still one categorical draw over leaves.
+    `uniform_prob` is a global floor over leaves.  A flat bank is exactly the
+    paper's sampler.
+
     Set `log_every` to keep snapshots of the bank in `self.trace` as episodes are credited,
     and `log_path` to also append them to a csv (step, success rates, sampling probs).
     """
 
     def __init__(
         self,
-        configs: Sequence | np.ndarray | torch.Tensor,
+        configs: Sequence | np.ndarray | torch.Tensor | dict,
         *,
         frontier_success_rate: float | Callable[[int], float] = 0.5,
         kernel_sharpness: float | Callable[[int], float] = 2.,
@@ -345,12 +438,17 @@ class SGSSampler:
         default_prob: float | Callable[[int], float] = 0.,
         score_fn: Callable | None = None,
         sample_fn: Callable | None = None,
+        group_success_fn: Callable | None = None,
+        group_score_fn: Callable | None = None,
+        log_hierarchy: bool = False,
         state_transform: Callable | None = None,
         log_every: int | None = None,
         log_path: str | os.PathLike | None = None,
         seed: int | None = None,
     ):
-        self.configs = [c for c in configs]
+        root = configs if isinstance(configs, dict) else list(configs)
+        self.configs, self._groups = _parse_bank(root)
+        self.depth = self._groups[-1]['depth']
         assert len(self.configs) > 0, 'configs must not be empty'
         assert window >= 1, f'window must be at least 1, got {window}'
         assert eps > 0., f'eps must be positive, got {eps}'
@@ -370,6 +468,9 @@ class SGSSampler:
 
         self.score_fn = score_fn
         self.sample_fn = sample_fn
+        self.group_success_fn = group_success_fn
+        self.group_score_fn = group_score_fn
+        self.log_hierarchy = log_hierarchy
         self.state_transform = state_transform
 
         self.log_every = log_every
@@ -382,11 +483,13 @@ class SGSSampler:
 
         self._cache: dict = {}
         self._version = 0
+        self._hier_key = None
+        self._hier = None
 
         self.rng = np.random.default_rng(seed)
 
     def _memo(self, key: str, compute):
-        # rates / weights / probs are recomputed on every reseed otherwise
+        # rates / weights are recomputed on every reseed otherwise
         # (1024 per cycle x 48 cells x ~window-size means)
 
         version = (self._version, self.step_count)
@@ -396,6 +499,108 @@ class SGSSampler:
             self._cache[key + '_v'] = version
 
         return self._cache[key]
+
+    def _group_rate(self, child_rates, child_counts, group):
+        fn = group['success_fn'] or self.group_success_fn or pooled_success_fn
+        available = dict(
+            child_rates = child_rates, child_counts = child_counts,
+            rates = child_rates, counts = child_counts,
+            name = group['name'], depth = group['depth'],
+        )
+        return float(fn(**inject_args(fn, available)))
+
+    def _group_weights(self, p, counts, group):
+        # score the group children of one parent - leaves keep their own score_fn
+
+        fn = self.group_score_fn if exists(self.group_score_fn) else sgs_score_fn
+        step = self.step_count
+        hparams = dict(
+            target = self.target, kappa = self.kappa,
+            eps = self.eps, unvisited_weight = self.unvisited_weight,
+        )
+        hparams.update(group['hparams'])
+
+        available = dict(
+            p = p, counts = counts,
+            step = step, window = self.window,
+            name = group['name'], depth = group['depth'],
+        )
+        available.update(
+            (key, resolve_schedule(value, step)) for key, value in hparams.items()
+        )
+        weights = torch.as_tensor(fn(**inject_args(fn, available)), dtype = torch.float32).reshape(-1)
+        assert weights.numel() == p.numel(), f'group_score_fn returned {weights.numel()} weights for {p.numel()} children'
+        return weights.clamp(min = 0.)
+
+    def _refresh(self):
+        # rates bottom up, routing top down, then group mass back up
+        # a ref is a leaf (>= 0) or a group (~ref), so branches can differ in depth
+
+        key = (self._version, self.step_count)
+        if self._hier_key == key:
+            return
+
+        leaf_rates, leaf_counts = to_numpy(self.success_rates), to_numpy(self.counts)
+        rates, counts = [], []
+        for group in self._groups:
+            refs = group['children']
+            child_rates = np.asarray([_child_value(ref, leaf_rates, rates) for ref in refs])
+            child_counts = np.asarray([_child_value(ref, leaf_counts, counts) for ref in refs])
+            rates.append(self._group_rate(child_rates, child_counts, group))
+            counts.append(child_counts.sum())
+
+        probs = torch.zeros(len(self.configs))
+        mass = torch.zeros(len(self._groups))
+        mass[-1] = 1.
+
+        for index in reversed(range(len(self._groups))):
+            group = self._groups[index]
+            refs = group['children']
+            leaf_pos = [i for i, ref in enumerate(refs) if ref >= 0]
+            group_pos = [i for i, ref in enumerate(refs) if ref < 0]
+
+            child_weights = torch.zeros(len(refs))
+            if leaf_pos:
+                child_weights[leaf_pos] = self.weights[[refs[i] for i in leaf_pos]]
+            if group_pos:
+                ids = [~refs[i] for i in group_pos]
+                p = torch.tensor([rates[i] for i in ids], dtype = torch.float32)
+                c = torch.tensor([counts[i] for i in ids], dtype = torch.long)
+                child_weights[group_pos] = self._group_weights(p, c, group)
+
+            child_probs = mass[index] * self._normalized(self._sampling_weights(child_weights))
+            for ref, prob in zip(refs, child_probs):
+                if ref >= 0:
+                    probs[ref] = prob
+                else:
+                    mass[~ref] = prob
+
+        probs = self._uniform_mix(probs)
+
+        group_probs = []
+        for group in self._groups:  # children first
+            group_probs.append(sum(
+                _child_value(ref, probs, group_probs) for ref in group['children']
+            ))
+
+        self._hier = dict(rates = rates, probs = probs, group_probs = group_probs)
+        self._hier_key = key
+
+    def _group_stat(self, key):
+        self._refresh()
+        return dict(
+            (group['name'], float(self._hier[key][index]))
+            for index, group in enumerate(self._groups)
+        )
+
+    @property
+    def group_rates(self):
+        return self._group_stat('rates')
+
+    @property
+    def group_probs(self):
+        # mass of a group = mass of all leaves below it
+        return self._group_stat('group_probs')
 
     def __len__(self) -> int:
         return len(self.configs)
@@ -436,7 +641,9 @@ class SGSSampler:
 
     @property
     def probs(self) -> torch.Tensor:
-        return self._memo('probs', lambda: self._mixed_probs(self._sampling_weights(self.weights)))
+        # marginal leaf distribution - a hierarchy just multiplies the levels
+        self._refresh()
+        return self._hier['probs']
 
     def _effective_temperature(self) -> float:
         # the paper floors the temperature at one: T_eff = max(T, 1)
@@ -450,19 +657,17 @@ class SGSSampler:
 
         return (weights.clamp(min = eps) + eps) ** (1. / self._effective_temperature())
 
-    def _mixed_probs(self, weights: torch.Tensor) -> torch.Tensor:
-        # normalize, then mix in the uniform floor - what the default sampler draws from
-
+    def _normalized(self, weights: torch.Tensor) -> torch.Tensor:
         total = weights.sum()
-        probs = weights / total if total > 0. else torch.full_like(weights, 1. / len(weights))
+        return weights / total if total > 0. else torch.full_like(weights, 1. / len(weights))
+
+    def _uniform_mix(self, probs: torch.Tensor) -> torch.Tensor:
+        # one global floor over leaves, not per group - nested and flat banks agree
 
         uniform_prob = resolve_schedule(self.uniform_prob, self.step_count)
         assert 0. <= uniform_prob <= 1., f'uniform_prob must be within [0, 1], got {uniform_prob}'
 
-        if uniform_prob > 0.:
-            probs = (1. - uniform_prob) * probs + uniform_prob * (1. / len(probs))
-
-        return probs
+        return (1. - uniform_prob) * probs + uniform_prob * (1. / len(probs))
 
     def draw_state(self, idx: int):
         # a config entry may be a fixed state or a callable drawing one from its own distribution
@@ -480,16 +685,15 @@ class SGSSampler:
         step = self.step_count
 
         # sample_fn is swappable, handed whatever it declares (see `inject_args`) - the
-        # default draws from the beta shaped `probs`, a custom one from any distribution
+        # default draws from the beta shaped `probs`, a custom one from any distribution.
+        # a hierarchy collapses to its leaf probs, so this stays a single draw.
 
         sample_fn = self.sample_fn if exists(self.sample_fn) else sgs_sample_fn
-
-        weights = self.weights
         available = dict(
             **self._bank_args(step),
             configs = self.configs,
-            weights = weights,
-            probs = self._mixed_probs(self._sampling_weights(weights)),
+            weights = self.weights,
+            probs = self.probs,
             rng = self.rng,
             size = size,
             uniform_prob = resolve_schedule(self.uniform_prob, step),
@@ -538,6 +742,9 @@ class SGSSampler:
             return
 
         snapshot = dict(step = self.step_count, success_rates = self.success_rates, probs = self.probs)
+        if self.log_hierarchy and self.depth > 1:
+            snapshot['group_rates'] = self.group_rates
+            snapshot['group_probs'] = self.group_probs
         self.trace.append(snapshot)
 
         if not exists(self.log_path):
@@ -554,12 +761,24 @@ class SGSSampler:
             values = [snapshot['step'], *to_numpy(snapshot['success_rates']), *to_numpy(snapshot['probs'])]
             log.write(','.join(f'{value:.4f}' for value in values) + '\n')
 
-    def add_config(self, config, init_p: float | None = None) -> int:
+    def add_config(self, config, init_p: float | None = None, group: str | None = None) -> int:
+        # a leaf joins the root, or any named group - ragged banks welcome
+
+        if exists(group):
+            matches = [node for node in self._groups if node['name'] == group]
+            assert len(matches) == 1, f'unknown group {group!r}'
+            parent = matches[0]
+        else:
+            parent = self._groups[-1]
+
         idx = len(self.configs)
         self.configs.append(copy_leaf(config))
         self.history.append(deque([float(init_p)], maxlen = self.window) if exists(init_p) else deque(maxlen = self.window))
         self.counts = torch.cat([self.counts, torch.tensor([exists(init_p)], dtype = torch.long)])
+        parent['children'].append(idx)
+
         self._version += 1  # invalidate cached rates / weights / probs -> new bank size
+        self._hier_key = None
         return idx
 
 # wrapper
