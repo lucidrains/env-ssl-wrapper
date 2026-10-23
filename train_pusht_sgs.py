@@ -8,11 +8,12 @@
 #     "imageio",
 #     "imageio[ffmpeg]",
 #     "matplotlib",
+#     "mean-conc-beta",
 #     "numpy",
 #     "opencv-python",
 #     "torch",
 #     "x-mlps-pytorch",
-#     "x-ppo>=0.0.7",
+#     "x-ppo>=0.0.21",
 # ]
 # ///
 #
@@ -20,7 +21,8 @@
 #
 #   uv run train_pusht_sgs.py                              # 2 arms x 3 seeds x 1M steps
 #   uv run train_pusht_sgs.py --steps=100000 --seeds=0     # quick look
-#   uv run train_pusht_sgs.py --method sgs --seed 0        # a single run (used by --parallel workers)
+#   uv run train_pusht_sgs.py --methods sgs --seeds 0      # a single arm / seed
+#   uv run train_pusht_sgs.py --single True --methods sgs --seeds 0   # worker path
 #
 # the bank holds 16 reset configurations: 10 near-goal (easy) + 6 standoff front (hard).
 # both arms share the learner, the step budget and the evaluation protocol - only the
@@ -52,18 +54,21 @@ import imageio
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from mean_conc_beta import Beta
 import numpy as np
 import torch
-from torch.distributions import Beta
 import torch.nn as nn
 import torch.nn.functional as F
 from x_mlps_pytorch import MLP
-from x_ppo import calc_gae, ppo_actor_loss
+from x_ppo import calc_gae, hpo_actor_loss
 
 from env_ssl_wrapper import (
     SGSSampler,
     StandardizeEnvWrapper,
     SuccessGuidedSamplingWrapper,
+    build_difficulty_bank,
+    ladder_frontier_index,
+    ladder_score_fn,
     uniform_score_fn,
 )
 
@@ -86,6 +91,8 @@ GOAL_COM = np.array([256. - 45. * np.sin(GOAL_TH), 256. + 45. * np.cos(GOAL_TH)]
 def fast_step(self, action):
     ax, ay = float(action[0]), float(action[1])
     dt, kp, kv = self.dt, self.k_p, self.k_v
+    self.n_contact_points = 0
+    self._last_action = action
     for _ in range(int(1 / (dt * self.control_hz))):
         px, py = self.agent.position
         vx, vy = self.agent.velocity
@@ -111,7 +118,101 @@ def make_pusht(max_steps = 50, seed = None):
 
     return env
 
-def build_configs():
+def native_config(rng, idx = 0, step = 0):
+    # fresh state from the native reset distribution
+    ax, ay = rng.integers(50, 450, size = 2).astype(np.float32)
+    bx, by = rng.integers(100, 400, size = 2).astype(np.float32)
+    th = float(rng.uniform(-np.pi, np.pi))
+    return np.array([ax, ay, bx, by, th], dtype = np.float32)
+
+def state_from_com(agent, block_com, th):
+    # pre-quirk reset state: the env sets body origin, then rotates about the local CoG (0, 45)
+    return np.array([agent[0], agent[1], block_com[0], block_com[1] - 45., th], dtype = np.float32)
+
+def curriculum_config(alpha):
+    # interpolate from the easy anchor (alpha=0) to a freshly sampled native state (alpha=1)
+    a = float(np.clip(alpha, 0., 1.))
+
+    def fn(rng, idx = 0, step = 0):
+        native = native_config(rng)
+        n_agent = native[:2]
+        n_com = np.array([native[2], native[3] + 45.])
+        n_th = float(native[4])
+
+        easy = build_configs()[int(rng.integers(10))]
+        e_agent = easy[:2]
+        e_com = np.array([easy[2], easy[3] + 45.])
+        e_th = float(easy[4])
+
+        agent = (1. - a) * e_agent + a * n_agent
+        com = (1. - a) * e_com + a * n_com
+        dth = np.arctan2(np.sin(n_th - e_th), np.cos(n_th - e_th))
+        th = e_th + a * dth
+
+        return state_from_com(agent, com, th)
+
+    return fn
+
+def tier_runway_config(w):
+    # Tier 1: Inside-the-push-cone runway & steering funnel (stochastic callable, zero train/eval overlap)
+    w = float(np.clip(w, 0., 1.))
+    c4, s4 = np.cos(GOAL_TH), np.sin(GOAL_TH)
+
+    def fn(rng, idx = 0, step = 0):
+        d = float(rng.uniform(4. + 45. * w, 12. + 125. * w))
+        dth = float(rng.uniform(-(0.02 + 0.65 * w), 0.02 + 0.65 * w))
+        du_spread = 1.5 + 38. * w
+        du = float(np.clip(0.45 * d * np.sin(dth) + rng.uniform(-du_spread, du_spread), -0.75 * d, 0.75 * d))
+        dv = -d * float(np.cos(0.4 * dth))
+        t_com = np.clip(GOAL_COM + np.array([du * c4 - dv * s4, du * s4 + dv * c4]), [100., 145.], [400., 445.])
+        th = float(GOAL_TH + dth)
+        c, s = np.cos(th), np.sin(th)
+        pb = np.array([t_com[0] + 45. * s, t_com[1] - 45. * c])
+        u_a = float(np.clip(-2500. * dth / max(d, 10.) + rng.uniform(-(4. + 60. * w), 4. + 60. * w), -75., 75.))
+        v_a = -float(rng.uniform(21., 24. + 80. * w))
+        agent = np.clip(np.array([pb[0] + c * u_a - s * v_a, pb[1] + s * u_a + c * v_a]), 50., 450.)
+        return state_from_com(agent, t_com, th)
+
+    return fn
+
+def tier_circumnav_config(w):
+    # Tier 2: Smooth progression from rear push (w=0) to omnidirectional agent spawn & circumnavigation (w=1)
+    w = float(np.clip(w, 0., 1.))
+    c4, s4 = np.cos(GOAL_TH), np.sin(GOAL_TH)
+
+    def fn(rng, idx = 0, step = 0):
+        d = float(rng.uniform(4. + 45. * w, 10. + 120. * w))
+        dth = float(rng.uniform(-(0.02 + 0.85 * w), 0.02 + 0.85 * w))
+        du = float(rng.uniform(-0.65 * d * (0.1 + 0.9 * w), 0.65 * d * (0.1 + 0.9 * w)))
+        dv = -d
+        t_com = np.clip(GOAL_COM + np.array([du * c4 - dv * s4, du * s4 + dv * c4]), [100., 145.], [400., 445.])
+        th = float(GOAL_TH + dth)
+        phi_max = float(np.pi * (0.05 + 0.95 * w))
+        phi_a = float(rng.uniform(-phi_max, phi_max))
+        r_a = float(rng.uniform(66. + 12. * min(w * 3., 1.), 70. + 95. * w))
+        c, s = np.cos(th), np.sin(th)
+        loc_u, loc_v = r_a * np.sin(phi_a), -r_a * np.cos(phi_a)
+        agent = np.clip(np.array([t_com[0] + c * loc_u - s * loc_v, t_com[1] + s * loc_u + c * loc_v]), 50., 450.)
+        return state_from_com(agent, t_com, th)
+
+    return fn
+
+NATIVE_BANK_SIZE = 32
+LADDER_SIZE = 144
+
+def build_expanded_configs():
+    # 176 stochastic callable configs strictly ordered by monotonic difficulty w in [0, 1] (zero train/eval overlap)
+    configs, _, _ = build_difficulty_bank(
+        (curriculum_config, tier_runway_config, tier_circumnav_config), native_config,
+        ladder_size = LADDER_SIZE, native_size = NATIVE_BANK_SIZE,
+        exponent = 1.5, max_difficulty = 1.,
+    )
+    return configs
+
+def materialize_config(c, rng, idx = 0, step = 0):
+    return c(rng, idx, step) if callable(c) else c
+
+def build_configs(expanded = False):
     configs, c4, s4 = [], np.cos(GOAL_TH), np.sin(GOAL_TH)
     # 10 near-goal configs (easy) + 6 standoff reaching & steering frontier configs (hard)
     specs = [
@@ -128,13 +229,19 @@ def build_configs():
         bx, by = t_com[0] + 45. * np.sin(th), t_com[1] - 45. * np.cos(th)
         ax, ay = bx + np.cos(th) * u_a - np.sin(th) * v_a, by + np.sin(th) * u_a + np.cos(th) * v_a
         configs.append(np.array([ax, ay, bx - 45. * np.sin(th), by - 45. * (1. - np.cos(th)), th], dtype = np.float32))
+
+    if expanded:
+        return build_expanded_configs()
+
     return configs
 
 NUM_EASY = 10
+NUM_FRONTIER = 6
 
 def get_kp(pos: torch.Tensor, th: torch.Tensor) -> torch.Tensor:
     c, s = torch.cos(th).unsqueeze(-1), torch.sin(th).unsqueeze(-1)
-    u, v = KP_LOC[:, 0], KP_LOC[:, 1]
+    loc = KP_LOC.to(pos.device)
+    u, v = loc[:, 0], loc[:, 1]
     return torch.cat([pos[..., 0:1] + c * u - s * v, pos[..., 1:2] + s * u + c * v], dim = -1)
 
 KP_GOAL = get_kp(torch.tensor([[256., 256.]]), torch.tensor([GOAL_TH])).squeeze(0)
@@ -144,7 +251,7 @@ def featurize(raw: torch.Tensor) -> torch.Tensor:
     pa, pb, th = raw[..., 0:2], raw[..., 2:4], raw[..., 4]
     c, s = torch.cos(th), torch.sin(th)
     cb = torch.stack([pb[..., 0] - 45. * s, pb[..., 1] + 45. * c], dim = -1)
-    g_com = torch.tensor(GOAL_COM)
+    g_com = raw.new_tensor(GOAL_COM)
     d_ab, d_cg = cb - pa, g_com - cb
     e1 = d_ab / (d_ab.norm(dim = -1, keepdim = True) + 1e-6)
     e2 = torch.stack([-e1[..., 1], e1[..., 0]], dim = -1)
@@ -152,7 +259,7 @@ def featurize(raw: torch.Tensor) -> torch.Tensor:
     loc_a = torch.stack([c * (pa - pb)[..., 0] + s * (pa - pb)[..., 1], -s * (pa - pb)[..., 0] + c * (pa - pb)[..., 1]], dim = -1) / 128.
     loc_g = torch.stack([c * d_cg[..., 0] + s * d_cg[..., 1], -s * d_cg[..., 0] + c * d_cg[..., 1]], dim = -1) / 128.
     dth = th - GOAL_TH
-    kp_err = (get_kp(pb, th) - KP_GOAL) / 128.
+    kp_err = (get_kp(pb, th) - KP_GOAL.to(pb.device)) / 128.
     return torch.cat([cg_ab, d_ab / 128., d_cg / 128., loc_a, loc_g, torch.stack([s, c, torch.sin(dth), torch.cos(dth)], dim = -1), kp_err], dim = -1)
 
 def to_env_action(raw: np.ndarray, act: np.ndarray, scale: float = 55.) -> np.ndarray:
@@ -164,19 +271,65 @@ def to_env_action(raw: np.ndarray, act: np.ndarray, scale: float = 55.) -> np.nd
     u = (act * 2. - 1.) * scale
     return np.clip(pa + u[..., 0:1] * e1 + u[..., 1:2] * e2, 15., 497.).astype(np.float32)
 
-def make_sampler(method = 'sgs', seed = 0, progression_path = None, target = 0.15, kappa = 3.0, eps = 0.06, window = 10, unvisited_weight = 0.4, uniform_prob = None):
+def shaping_potential(raw: np.ndarray) -> np.ndarray:
+    # negative pose distance (CoM + angle) to goal + distance-gated push-side contact + multi-scale near-goal bullseye funnel
+    pa, pb, th = raw[..., 0:2], raw[..., 2:4], raw[..., 4]
+    cb = np.stack([pb[..., 0] - 45. * np.sin(th), pb[..., 1] + 45. * np.cos(th)], axis = -1)
+    v_cg = GOAL_COM - cb
+    d_cg = np.linalg.norm(v_cg, axis = -1)
+    d_th = 60. * np.sqrt(np.maximum(0., 2. * (1. - np.cos(th - GOAL_TH))))
+    d_pose = np.hypot(d_cg, d_th)
+    push_pt = cb - 48. * v_cg / (d_cg[..., None] + 10.)
+    d_ab = np.linalg.norm(push_pt - pa, axis = -1)
+    approach_gate = np.clip((d_pose - 6.0) / 18.0, 0.0, 1.0)
+    funnel = (
+        1.5 * np.exp(-(d_pose ** 2) / (2. * 18. ** 2))
+        + 2.0 * np.exp(-(d_pose ** 2) / (2. * 6.0 ** 2))
+        + 2.5 * np.exp(-(d_pose ** 2) / (2. * 2.2 ** 2))
+    )
+    return -(0.5 * approach_gate * d_ab + d_cg + d_th) / 100. + funnel
+
+def behind_alignment(raw):
+    # +1 when the agent is directly goal-opposite the block, -1 when it is on the goal side
+    pa, pb, th = raw[0:2], raw[2:4], raw[4]
+    cb = np.array([pb[0] - 45. * np.sin(th), pb[1] + 45. * np.cos(th)])
+    d_ab = np.linalg.norm(cb - pa)
+    if d_ab < 1e-6:
+        return d_ab, 0.
+    away = cb - GOAL_COM
+    away = away / (np.linalg.norm(away) + 1e-6)
+    return d_ab, float(np.dot((pa - cb) / d_ab, away))
+
+BETA = Beta(bounds = (0., 1.))
+
+def policy_dist(out: torch.Tensor):
+    params = out.reshape(*out.shape[:-1], 2, 2)
+    return BETA(params), BETA.mean(params)
+
+def compute_frontier_k(p: torch.Tensor, counts: torch.Tensor) -> int:
+    return ladder_frontier_index(p, counts, threshold = 0.25, min_count = 2, kernel = 5, fallback = 4)
+
+def frontier_ladder_score_fn(p, counts, target = 0.35, kappa = 4.0, eps = 1e-4, unvisited_weight = 0.25):
+    return ladder_score_fn(p, counts, target = target, kappa = kappa, eps = eps, unvisited_weight = unvisited_weight)
+
+def make_sampler(method = 'sgs', seed = 0, progression_path = None, target = 0.35, kappa = 4.0, eps = 1e-4, window = 10, unvisited_weight = 0.25, uniform_prob = None, expanded_bank = False, configs = None):
     if uniform_prob is None:
-        uniform_prob = 0.10 if method == 'sgs' else 0.0
+        uniform_prob = 0.02 if (method == 'sgs' and expanded_bank) else (0.10 if method == 'sgs' else 0.0)
+
+    if configs is None:
+        configs = build_configs(expanded = expanded_bank)
+
+    score_fn = uniform_score_fn if method == 'uniform' else (frontier_ladder_score_fn if expanded_bank else None)
 
     return SGSSampler(
-        configs = build_configs(),
+        configs = configs,
         target = target,
         kappa = kappa,
         eps = eps,
         window = window,
         unvisited_weight = unvisited_weight,
         uniform_prob = uniform_prob,
-        score_fn = uniform_score_fn if method == 'uniform' else None,
+        score_fn = score_fn,
         log_every = 1,
         log_path = progression_path,
         seed = seed,
@@ -209,33 +362,58 @@ def train(
     critic_sigmoid = False,
     value_clip = 0.0,
     entropy_coef = 5e-4,
+    expanded_bank = False,
+    shaping = 0.0,
+    side_weight = 0.0,
     progression_path = None,
     checkpoint_path = None,
+    resume_path = None,
     verbose = True,
 ):
     assert method in ('uniform', 'sgs', 'native'), f'unknown method {method}'
+    assert num_envs >= 1 and rollout >= 1, 'num_envs and rollout must be positive'
+    assert max_timesteps >= 1 and eval_every >= 1 and eval_episodes >= 1, 'timestep counts must be positive'
+    assert steps >= num_envs * rollout, f'steps ({steps}) must cover at least one update ({num_envs * rollout})'
 
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    configs = build_configs()
-    bank_envs = [make_pusht(max_timesteps) for _ in configs]
-    sampler = None if method == 'native' else make_sampler(method, seed = seed, progression_path = progression_path, target = target, kappa = kappa, uniform_prob = uniform_prob)
+    if progression_path:
+        Path(progression_path).unlink(missing_ok = True)
+
+    if checkpoint_path:
+        Path(checkpoint_path).parent.mkdir(parents = True, exist_ok = True)
+
+    configs = build_configs(expanded = expanded_bank)
+    eval_rng = np.random.default_rng(seed + 987_654)
+    eval_configs = [materialize_config(c, eval_rng, i) for i, c in enumerate(configs)]
+    bank_envs = [make_pusht(max_timesteps, seed = seed * 100_000 + 50_000 + i) for i in range(len(configs))]
+
+    sampler_configs = configs
+    sampler = None if method == 'native' else make_sampler(method, seed = seed, progression_path = progression_path, target = target, kappa = kappa, uniform_prob = uniform_prob, expanded_bank = expanded_bank, configs = sampler_configs)
+
+    if expanded_bank and sampler is not None:
+        sampler.log_every = None  # bank size changes; keep the CSV out of the staged run
 
     if method == 'native':
-        envs = [make_pusht(max_timesteps) for _ in range(num_envs)]
+        envs = [make_pusht(max_timesteps, seed = seed * 100_000 + i) for i in range(num_envs)]
     else:
-        envs = [SuccessGuidedSamplingWrapper(make_pusht(max_timesteps), reset_configs = sampler) for _ in range(num_envs)]
+        envs = [SuccessGuidedSamplingWrapper(make_pusht(max_timesteps, seed = seed * 100_000 + i), reset_configs = sampler) for i in range(num_envs)]
 
     actor = MLP(22, 128, 128, 4, activation = nn.SiLU())
     critic = MLP(22, 128, 128, 1, activation = nn.SiLU(), squeeze_out = True)
     opt = torch.optim.Adam([*actor.parameters(), *critic.parameters()], lr = lr)
     succ_buf: deque[tuple[np.ndarray, np.ndarray, np.ndarray]] = deque(maxlen = 20)
 
+    if resume_path:
+        ckpt = torch.load(resume_path, map_location = 'cpu', weights_only = False)
+        actor.load_state_dict(ckpt['actor'])
+        if 'critic' in ckpt:
+            critic.load_state_dict(ckpt['critic'])
+        print(f'[{method:>7}] resumed actor from {resume_path}', flush = True)
+
     def get_dist(obs_t):
-        out = actor(featurize(obs_t))
-        m, c = out[..., :2].sigmoid() * 0.90 + 0.05, 4. + (out[..., 2:] - 1.).sigmoid() * 60.
-        return Beta(1. + m * c, 1. + (1. - m) * c), m
+        return policy_dist(actor(featurize(obs_t)))
 
     def value_of(obs_t):
         v = critic(featurize(obs_t))
@@ -247,11 +425,11 @@ def train(
         # for every arm and seed. use_mean evaluates the beta mean (greedy); otherwise
         # actions are sampled, matching the stochastic policy the learner optimizes
 
-        succ = np.zeros((eval_episodes, len(configs)), dtype = np.float32)
+        succ = np.zeros((eval_episodes, len(eval_configs)), dtype = np.float32)
 
         for ep in range(eval_episodes):
-            obs = np.stack([e.reset(seed = seed_base + 1000 * ep + i, options = dict(reset_to_state = c))[0] for i, (e, c) in enumerate(zip(bank_envs, configs))]).astype(np.float32)
-            done = np.zeros(len(configs), dtype = bool)
+            obs = np.stack([e.reset(seed = seed_base + 1000 * ep + i, options = dict(reset_to_state = c))[0] for i, (e, c) in enumerate(zip(bank_envs, eval_configs))]).astype(np.float32)
+            done = np.zeros(len(eval_configs), dtype = bool)
 
             # one seeded stream per episode, so sampled actions stay independent across steps
 
@@ -262,8 +440,8 @@ def train(
                     if done.all():
                         break
 
-                    dist, m = get_dist(torch.from_numpy(obs))
-                    act_np = (m if use_mean else dist.sample().clamp(0.01, 0.99)).numpy()
+                    dist, mean = get_dist(torch.from_numpy(obs))
+                    act_np = (mean if use_mean else dist.sample()).numpy()
 
                     for i in np.where(~done)[0]:
                         obs[i], _, term, trunc, _ = bank_envs[i].step(to_env_action(obs[i], act_np[i]))
@@ -289,7 +467,7 @@ def train(
             obs_t = torch.from_numpy(obs)
             with torch.no_grad():
                 dist, _ = get_dist(obs_t)
-                act = dist.sample().clamp(0.01, 0.99)
+                act = dist.sample()
                 lp, val = dist.log_prob(act).sum(-1), value_of(obs_t)
             env_act = to_env_action(obs, act.numpy())
             next_obs, rew, mask = np.empty_like(obs), np.zeros(num_envs, dtype = np.float32), np.ones(num_envs, dtype = np.float32)
@@ -297,6 +475,12 @@ def train(
                 no, cov_r, term, trunc, _ = e.step(env_act[i])
                 ep_s[i].append(obs[i]); ep_a[i].append(act[i].numpy())
                 rew[i] = 0.1 * float(cov_r) + (success_bonus if term else 0.)
+                if shaping > 0.:
+                    rew[i] += shaping * (gamma * float(shaping_potential(no)) - float(shaping_potential(obs[i])))
+                if side_weight > 0.:
+                    d_ab, align = behind_alignment(obs[i])
+                    if d_ab < 120.:
+                        rew[i] += side_weight * (1. if align > 0.2 else -0.5)
                 if trunc and not term:
                     with torch.no_grad():
                         rew[i] += gamma * float(value_of(torch.from_numpy(no.astype(np.float32))))
@@ -325,16 +509,19 @@ def train(
         for _ in range(epochs):
             for idx in torch.randperm(len(Sf)).split(minibatch):
                 dist, _ = get_dist(Sf[idx])
-                pg = ppo_actor_loss(dist.log_prob(Af[idx]).sum(-1), LPf[idx], advs[idx], 0.2, normalize_advantages = False).mean()
+                pg = hpo_actor_loss(dist.log_prob(Af[idx]).sum(-1), LPf[idx], advs[idx], 0.2, normalize_advantages = False).mean()
                 vf_target = rets[idx].clamp(0., 1.) if critic_sigmoid else rets[idx]
                 vf = F.mse_loss(value_of(Sf[idx]), vf_target)
                 loss = pg + 0.5 * vf - entropy_coef * dist.entropy().sum(-1).mean()
                 if succ_buf:
                     bs = torch.from_numpy(np.concatenate([v[0] for v in succ_buf]))
-                    ba = torch.from_numpy(np.concatenate([v[1] for v in succ_buf])).clamp(0.01, 0.99)
+                    ba = torch.from_numpy(np.concatenate([v[1] for v in succ_buf]))
                     br = torch.from_numpy(np.concatenate([v[2] for v in succ_buf]))
                     bdist, bmean = get_dist(bs)
-                    loss = loss + 0.25 * ((-bdist.log_prob(ba).sum(-1) + 6. * (bmean - ba).pow(2).sum(-1)) * br).mean() + 0.15 * F.mse_loss(value_of(bs), success_bonus * br)
+                    bvalue = success_bonus * br
+                    if critic_sigmoid:
+                        bvalue = bvalue.clamp(0., 1.)
+                    loss = loss + 0.25 * ((-bdist.log_prob(ba).sum(-1) + 6. * (bmean - ba).pow(2).sum(-1)) * br).mean() + 0.15 * F.mse_loss(value_of(bs), bvalue)
                 opt.zero_grad(); loss.backward(); nn.utils.clip_grad_norm_([*actor.parameters(), *critic.parameters()], 0.5); opt.step()
 
         if upd % eval_every == 0 or upd == num_updates:
@@ -356,7 +543,7 @@ def train(
 
             if per_config[NUM_EASY:].mean() > best_frontier and checkpoint_path:
                 best_frontier = float(per_config[NUM_EASY:].mean())
-                torch.save(dict(actor = actor.state_dict(), method = method, seed = seed, steps = upd * num_envs * rollout, eval_frontier = best_frontier), checkpoint_path)
+                torch.save(dict(actor = actor.state_dict(), critic = critic.state_dict(), method = method, seed = seed, steps = upd * num_envs * rollout, eval_frontier = best_frontier, policy = 'mean_conc_beta'), checkpoint_path)
 
             if verbose:
                 print(f'[{method:>7}] step {upd * num_envs * rollout:8d} | eval_all: {per_config.mean():5.1%} | eval_frontier: {per_config[NUM_EASY:].mean():5.1%} | '
@@ -370,7 +557,7 @@ def train(
     final_ckpt = None
     if checkpoint_path:
         final_ckpt = str(checkpoint_path).replace('.pt', '_final.pt')
-        torch.save(dict(actor = actor.state_dict(), method = method, seed = seed, steps = steps), final_ckpt)
+        torch.save(dict(actor = actor.state_dict(), critic = critic.state_dict(), method = method, seed = seed, steps = steps, policy = 'mean_conc_beta'), final_ckpt)
 
     return dict(method = method, seed = seed, steps = steps, max_timesteps = max_timesteps, history = history, time = time.time() - t0, checkpoint = final_ckpt)
 
@@ -408,7 +595,11 @@ def plot(runs, steps, path = 'pusht_sgs.png'):
             if key == 'frontier_mass' and not np.isfinite(y).any():
                 continue
 
-            y = y * 100.
+            is_pct = key != 'episodes'
+
+            if is_pct:
+                y = y * 100.
+
             mean, std = y.mean(0), y.std(0)
             ax.plot(x / 1000., mean, color = STYLE[method]['color'], linewidth = 2., label = STYLE[method]['label'])
 
@@ -416,7 +607,7 @@ def plot(runs, steps, path = 'pusht_sgs.png'):
                 ax.fill_between(x / 1000., mean - std, mean + std, color = STYLE[method]['color'], alpha = 0.18, linewidth = 0)
 
         ax.set_xlabel('environment steps (thousands)')
-        ax.set_ylabel('%')
+        ax.set_ylabel('episodes' if key == 'episodes' else '%')
         ax.set_title(title, fontsize = 10.5)
         ax.grid(alpha = 0.25)
 
@@ -435,7 +626,7 @@ def plot(runs, steps, path = 'pusht_sgs.png'):
 
     num_seeds = len(runs_of(runs, methods[0], steps))
     fig.suptitle(
-        f'Success-Guided Sampling on Push-T - PPO, same learner, {len(methods)} arms x {num_seeds} seeds, {steps // 1000}k env steps each\n' + '\n'.join(lines),
+        f'Success-Guided Sampling on Push-T - PPO, same learner, {len(methods)} arms x {num_seeds} seeds, {steps / 1000:g}k env steps each\n' + '\n'.join(lines),
         fontsize = 11.5,
     )
     fig.tight_layout(rect = (0., 0., 1., 0.92))
@@ -448,14 +639,20 @@ def plot(runs, steps, path = 'pusht_sgs.png'):
 
 def load_actor(path):
     ckpt = torch.load(path, map_location = 'cpu', weights_only = False)
+    if ckpt.get('policy') != 'mean_conc_beta':
+        print(f'warning: {path} predates the mean-conc-beta policy; retrain it')
     actor = MLP(22, 128, 128, 4, activation = nn.SiLU())
     actor.load_state_dict(ckpt['actor'])
     actor.eval()
     return actor, ckpt
 
 @torch.no_grad()
-def record_solves(actor, run_dir, max_timesteps = 50, seed = 0, max_videos = 6):
-    configs = build_configs()
+def record_solves(actor, run_dir, max_timesteps = 50, seed = 0, max_videos = 6, expanded_bank = False):
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents = True, exist_ok = True)
+    configs = build_configs(expanded = expanded_bank)
+    config_rng = np.random.default_rng(seed + 654_321)
+    configs = [materialize_config(c, config_rng, i) for i, c in enumerate(configs)]
     results = []
 
     for idx in range(NUM_EASY, len(configs)):
@@ -468,9 +665,8 @@ def record_solves(actor, run_dir, max_timesteps = 50, seed = 0, max_videos = 6):
         frames, success, best = [], False, 0.0
 
         for _ in range(max_timesteps):
-            out = actor(featurize(torch.from_numpy(raw[None])))
-            act = (out[..., :2].sigmoid() * 0.90 + 0.05).numpy()[0]
-            action = to_env_action(raw, act)
+            _, mean = policy_dist(actor(featurize(torch.from_numpy(raw[None]))))
+            action = to_env_action(raw, mean.numpy()[0])
             obs, reward, term, trunc, info = env.step(action)
             raw = np.asarray(obs, dtype = np.float32)
             best = max(best, float(info.get('coverage', 0.)))
@@ -506,15 +702,21 @@ def main(
     eval_every: int = 8,
     eval_episodes: int = 6,
     lr: float = 3e-4,
+    gamma: float = 0.98,
     target: float = 0.15,
     kappa: float = 3.0,
+    uniform_prob: float = 0.1,
     success_bonus: float = 10.0,
     critic_sigmoid: bool = False,
     value_clip: float = 0.0,
     entropy_coef: float = 5e-4,
+    expanded_bank: bool = False,
+    shaping: float = 0.0,
+    side_weight: float = 0.0,
     parallel: int = 1,
     single: bool = False,
     run: str = 'pusht_sgs',
+    resume: str = '',
     render: bool = True,
     rerun: bool = False,
 ):
@@ -522,15 +724,20 @@ def main(
     run_dir.mkdir(parents = True, exist_ok = True)
 
     method_list, seed_list = [str(m) for m in as_list(methods)], [int(s) for s in as_list(seeds)]
+    assert method_list, 'at least one method is required'
+    assert seed_list, 'at least one seed is required'
+    assert all(m in ('uniform', 'sgs', 'native') for m in method_list), f'unknown methods: {method_list}'
 
     def combo_kwargs(method, seed):
         return dict(
             method = method, steps = steps, num_envs = num_envs, rollout = rollout, seed = seed,
             max_timesteps = max_timesteps, eval_every = eval_every, eval_episodes = eval_episodes,
-            lr = lr, target = target, kappa = kappa,
+            lr = lr, gamma = gamma, target = target, kappa = kappa, uniform_prob = uniform_prob,
             success_bonus = success_bonus, critic_sigmoid = critic_sigmoid, value_clip = value_clip, entropy_coef = entropy_coef,
+            expanded_bank = expanded_bank, shaping = shaping, side_weight = side_weight,
             progression_path = run_dir / f'sgs_progression_{method}_{seed}.csv',
             checkpoint_path = run_dir / f'actor_{method}_{seed}.pt',
+            resume_path = str(Path(resume) / f'actor_{method}_{seed}.pt') if resume else None,
         )
 
     def result_path(method, seed):
@@ -544,6 +751,10 @@ def main(
 
     combos = [(m, s) for m in method_list for s in seed_list]
 
+    if rerun:
+        for method, seed in combos:
+            result_path(method, seed).unlink(missing_ok = True)
+
     if parallel > 1:
         pending = [(m, s) for m, s in combos if rerun or not result_path(m, s).exists()]
         procs = {}
@@ -554,10 +765,11 @@ def main(
                 log = open(run_dir / f'worker_{method}_{seed}.log', 'w')
                 cmd = [sys.executable, str(Path(__file__).resolve()), '--single', 'True', '--methods', method, '--seeds', str(seed),
                        '--steps', str(steps), '--num_envs', str(num_envs), '--rollout', str(rollout), '--max_timesteps', str(max_timesteps),
-                       '--eval_every', str(eval_every), '--eval_episodes', str(eval_episodes), '--lr', str(lr), '--target', str(target),
-                       '--kappa', str(kappa), '--success_bonus', str(success_bonus), '--critic_sigmoid', str(critic_sigmoid),
+                       '--eval_every', str(eval_every), '--eval_episodes', str(eval_episodes), '--lr', str(lr), '--gamma', str(gamma), '--target', str(target),
+                       '--kappa', str(kappa), '--uniform_prob', str(uniform_prob), '--success_bonus', str(success_bonus), '--critic_sigmoid', str(critic_sigmoid),
                        '--value_clip', str(value_clip), '--entropy_coef', str(entropy_coef),
-                       '--run', str(run), '--render', 'False']
+                       '--expanded_bank', str(expanded_bank), '--shaping', str(shaping), '--side_weight', str(side_weight),
+                       '--run', str(run), '--resume', str(resume), '--render', 'False']
                 env_vars = dict(os.environ, OMP_NUM_THREADS = '1', MKL_NUM_THREADS = '1', PUSHT_WORKER = '1')
                 procs[(method, seed)] = (subprocess.Popen(cmd, stdout = log, stderr = subprocess.STDOUT, env = env_vars), log)
                 print(f'=== launched {method} seed {seed} (pid {procs[(method, seed)][0].pid}) ===', flush = True)
@@ -579,7 +791,7 @@ def main(
             result_path(method, seed).write_text(json.dumps(result))
             print(f'=== {method} | seed {seed} done in {result["time"]:.1f}s ===\n', flush = True)
 
-    runs = [json.loads(p.read_text()) for p in sorted(run_dir.glob('result_*.json')) if json.loads(p.read_text())['steps'] == steps]
+    runs = [result for p in sorted(run_dir.glob('result_*.json')) if (result := json.loads(p.read_text()))['steps'] == steps]
     (run_dir / 'results.json').write_text(json.dumps(runs))
 
     if len(runs):
@@ -593,7 +805,7 @@ def main(
             if ckpt.exists():
                 actor, meta = load_actor(ckpt)
                 print(f'=== rendering best SGS policy (seed {best["seed"]}, frontier {meta.get("eval_frontier", float("nan")):.1%}) ===', flush = True)
-                results = record_solves(actor, run_dir, max_timesteps = max_timesteps)
+                results = record_solves(actor, run_dir, max_timesteps = max_timesteps, expanded_bank = expanded_bank)
                 print('frontier solves:', results, flush = True)
 
     print(f'\nresults in {run_dir}/')

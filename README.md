@@ -520,6 +520,21 @@ with MultiprocessingVecEnv('CartPole-v1', num_envs = 8) as env:
     obs, info = env.reset()
 ```
 
+### Seeding and per-slot resets
+
+`reset_env(env, seed)` seeds every slot with the same seed — common random numbers, so vectorized fitness comparisons differ only by policy. `reset_env_at(env, i, seed)` resets one slot; it uses an explicit `reset_at` / `reset_one`, gymnasium 1.x's `options['reset_mask']`, or the env's sub-env list, and returns that slot's obs / info (or `None` when the env has no per-slot reset path). `write_slot_obs` patches the returned obs back into a batched tree.
+
+```python
+from env_ssl_wrapper import reset_env, reset_env_at, write_slot_obs
+
+obs, info = reset_env(env, seed = 0)          # every slot replays seed 0
+out = reset_env_at(env, 2, seed = 7)         # replay seed 7 on slot 2 only
+
+if out is not None:
+    slot_obs, _ = out
+    obs = write_slot_obs(obs, slot_obs, 2)
+```
+
 ## Evaluation
 
 `evaluate_actor` rolls a policy through any standardized env and returns per-episode stats, optionally recording videos.
