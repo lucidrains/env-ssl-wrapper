@@ -13,6 +13,7 @@ from .helpers import (
     get_adapter,
     get_attr,
     instantiate_env,
+    normalize_reset_out,
     safe_close,
     stack_trees,
     to_numpy,
@@ -285,17 +286,29 @@ class MultiprocessingVecEnv:
     def reset_at(self, index: int, seed = None, **kwargs):
         worker_kwargs = dict(kwargs)
         if exists(seed):
-            worker_kwargs['seed'] = seed
+            worker_kwargs['seed'] = int(seed)
         safe_send(self._conns[index], ('reset', worker_kwargs))
-        return send_recv(self._conns[index])
+        return normalize_reset_out(send_recv(self._conns[index]))
 
     def reset(self, seed = None, **kwargs):
         options = kwargs.get('options')
 
+        # a scalar keeps the gymnasium convention (seed, seed + 1, ...);
+        # a list seeds each slot explicitly, so [seed] * n gives every slot
+        # the same episode - common random numbers for fitness comparisons
+
+        if isinstance(seed, (list, tuple, np.ndarray)):
+            seeds = [int(s) if exists(s) else None for s in seed]
+            assert len(seeds) == self.num_envs, f'expected {self.num_envs} seeds, but got {len(seeds)}'
+        elif exists(seed):
+            seeds = [seed + i for i in range(self.num_envs)]
+        else:
+            seeds = [None] * self.num_envs
+
         for i, conn in enumerate(self._conns):
             worker_kwargs = dict(kwargs)
-            if exists(seed):
-                worker_kwargs['seed'] = seed + i
+            if exists(seeds[i]):
+                worker_kwargs['seed'] = seeds[i]
 
             if isinstance(options, (list, tuple)) and len(options) == self.num_envs:
                 worker_kwargs['options'] = options[i]

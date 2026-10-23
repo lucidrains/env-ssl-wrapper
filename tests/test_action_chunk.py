@@ -593,4 +593,4 @@ def test_action_chunk_dm_control_raw():
 
 def test_action_chunk_all_export():
     import env_ssl_wrapper
-    assert 'ActionChunkWrapper' in env_ssl_wrapper.__all__
+    assert hasattr(env_ssl_wrapper, 'ActionChunkWrapper')

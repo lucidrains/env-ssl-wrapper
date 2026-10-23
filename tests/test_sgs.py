@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from env_ssl_wrapper import (
@@ -9,7 +10,13 @@ from env_ssl_wrapper import (
     SGSSampler,
     StandardizeEnvWrapper,
     SuccessGuidedSamplingWrapper,
+    build_difficulty_bank,
     compose_env,
+    difficulty_frontier,
+    difficulty_score_fn,
+    ladder_frontier_index,
+    ladder_score_fn,
+    reset_env_at,
     sgs_sample_fn,
     sgs_score_fn,
     uniform_score_fn,
@@ -62,6 +69,164 @@ def test_sgs_score_fn_asymmetric_target():
     weights = sgs_score_fn(p, counts, target = 0.7, kappa = 4.0, eps = 0.01)
     assert int(weights.argmax().item()) == 2
 
+def test_ladder_score_fn_retains_and_probes_around_the_frontier():
+    p = torch.tensor([1., 1., 1., 0.5, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+
+    k_star = ladder_frontier_index(p, counts)
+    assert 3 <= k_star <= 4
+
+    weights = ladder_score_fn(p, counts, probe_offset = 5., probe_width = 2., envelope_span = 15., envelope_width = 2.)
+
+    # mastered rungs keep at least the retain floor, the probe peaks just past the frontier
+    assert torch.all(weights[:k_star + 1] >= 0.35 - 1e-6)
+    assert weights[k_star + 5] > weights[k_star + 15]
+    assert torch.all(weights >= 0.)
+
+def test_difficulty_score_fn_collapses_replicas_and_smooths_by_difficulty():
+    # six replicas at each of four difficulty levels; the frontier is the level
+    # whose aggregate success clears the threshold
+    difficulty = torch.tensor([0., 0., 0., .25, .25, .25, .5, .5, .5, 1., 1., 1.])
+    p = torch.tensor([1., 1., 1., 1., .8, .9, .2, .3, .1, 0., 0., 0.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+
+    assert difficulty_frontier(p, counts, difficulty) == .25
+
+    weights = difficulty_score_fn(p, counts, difficulty = difficulty, probe_offset = .03, probe_width = .02, envelope_span = .09)
+
+    # all replicas at the same difficulty share one weight
+    assert torch.allclose(weights[:3], weights[:1].expand(3))
+    assert torch.allclose(weights[3:6], weights[3:4].expand(3))
+    # probe is above the frontier, native tail is suppressed
+    assert weights[6:9].max() > weights[9:].max()
+
+def test_build_difficulty_bank_layout():
+    def family(name):
+        return lambda w: (lambda rng, idx = 0, step = 0: np.array([w, int(idx), name]))
+
+    configs, difficulty, native = build_difficulty_bank(
+        (family(0), family(1), family(2)), family(3),
+        ladder_size = 12, native_size = 4, max_difficulty = .9,
+        schedule = (0, 1, 0, 2),
+    )
+
+    assert len(configs) == 16 and native.sum() == 4
+    assert np.all(np.diff(difficulty[:12]) >= 0.)
+    assert difficulty[11] <= .9 + 1e-6
+    assert np.all(difficulty[12:] == 1.)
+
+    kinds = [int(configs[i](np.random.default_rng(0))[2]) for i in range(4)]
+    assert kinds == [0, 1, 0, 2]
+
+def test_difficulty_frontier_can_ignore_the_native_tail():
+    difficulty = torch.tensor([0., .25, .5, .75, 1., 1., 1.])
+    p = torch.tensor([1., 1., 0., 0., 1., 1., 1.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+
+    assert difficulty_frontier(p, counts, difficulty, frontier_mask = difficulty < 1.) == .25
+    # without the mask the solved native tail pulls the frontier up
+    assert difficulty_frontier(p, counts, difficulty) > .25
+
+def test_difficulty_score_fn_matches_ladder_score_fn_on_a_uniform_rung():
+    n = 20
+    p = torch.linspace(1., 0., n)
+    counts = torch.full((n,), 10, dtype = torch.long)
+    difficulty = torch.linspace(0., .96, n)
+
+    index_weights = ladder_score_fn(p, counts, probe_offset = 5., probe_width = 2., envelope_span = 15., envelope_width = 2.)
+    diff_weights = difficulty_score_fn(
+        p, counts, difficulty = difficulty,
+        probe_offset = 5. / n, probe_width = 2. / n, envelope_span = 15. / n, envelope_width = 2. / n,
+    )
+
+    assert torch.allclose(index_weights, diff_weights, atol = 2e-2)
+
+def test_score_functions_handle_empty_banks():
+    p = torch.empty(0)
+    counts = torch.empty(0, dtype = torch.long)
+
+    assert sgs_score_fn(p, counts).numel() == 0
+    assert ladder_score_fn(p, counts).numel() == 0
+    assert difficulty_score_fn(p, counts, difficulty = torch.empty(0)).numel() == 0
+    assert ladder_frontier_index(p, counts) == 0
+    assert difficulty_frontier(p, counts, torch.empty(0)) == 0.05
+
+def test_score_functions_accept_missing_counts():
+    p = torch.tensor([.2, .8])
+
+    assert ladder_score_fn(p).shape == (2,)
+    assert difficulty_score_fn(p, difficulty = torch.tensor([0., 1.])).shape == (2,)
+    assert ladder_frontier_index(p) >= 0
+
+def test_ladder_frontier_fallback_is_clamped_and_kernel_must_be_odd():
+    p = torch.tensor([1., 0., 0.])
+    counts = torch.zeros(3, dtype = torch.long)
+
+    assert ladder_frontier_index(p, counts, fallback = 99) == 2
+
+    with pytest.raises(AssertionError, match = 'odd'):
+        ladder_frontier_index(p, counts, kernel = 4)
+
+    with pytest.raises(AssertionError, match = 'counts length'):
+        ladder_frontier_index(p, torch.zeros(2, dtype = torch.long))
+
+def test_difficulty_score_fn_validates_and_handles_masked_native():
+    p = torch.tensor([1., .5, 0., 1.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+    difficulty = torch.tensor([0., .5, 1., 1.])
+
+    with pytest.raises(AssertionError, match = 'difficulty length'):
+        difficulty_score_fn(p, counts, difficulty = torch.tensor([0., .5]))
+
+    with pytest.raises(AssertionError, match = 'finite'):
+        difficulty_score_fn(p, counts, difficulty = torch.tensor([0., .5, float('nan'), 1.]))
+
+    with pytest.raises(AssertionError, match = 'frontier_mask length'):
+        difficulty_frontier(p, counts, difficulty, frontier_mask = torch.tensor([True, False]))
+
+    with pytest.raises(AssertionError, match = 'positive'):
+        ladder_score_fn(p, counts, probe_width = 0.)
+
+    with pytest.raises(AssertionError, match = 'non-negative'):
+        difficulty_score_fn(p, counts, difficulty = difficulty, envelope_span = -1.)
+
+    # all native configs masked out -> no ladder frontier available
+    assert difficulty_frontier(p, counts, difficulty, frontier_mask = difficulty < 1.) == .5
+
+def test_difficulty_group_normalization_splits_replica_mass():
+    p = torch.tensor([1., .5, .5, 0.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+    difficulty = torch.tensor([0., .5, .5, 1.])
+
+    raw = difficulty_score_fn(p, counts, difficulty = difficulty, normalize_groups = False)
+    grouped = difficulty_score_fn(p, counts, difficulty = difficulty, normalize_groups = True)
+
+    assert torch.allclose(grouped[1], grouped[2])
+    assert torch.isclose(grouped[1] + grouped[2], raw[1])
+
+def test_build_difficulty_bank_edge_cases():
+    def family(tag):
+        return lambda w: (lambda rng, idx = 0, step = 0: np.array([w, tag, idx]))
+
+    configs, difficulty, native = build_difficulty_bank(
+        (family(0), family(1), family(2)), family(3),
+        ladder_size = 2, native_size = 0,
+    )
+    assert len(configs) == 2 and difficulty.shape == (2,) and native.sum() == 0
+    assert difficulty[0] == 0. and difficulty[1] == 1.
+
+    configs, _, _ = build_difficulty_bank(
+        (family(0), family(1), family(2)), family(3),
+        ladder_size = 6, native_size = 2,
+    )
+    assert [int(configs[i](np.random.default_rng(0))[1]) for i in range(6)] == [0, 1, 2, 0, 1, 2]
+
+    with pytest.raises(AssertionError, match = 'invalid schedule'):
+        build_difficulty_bank((family(0), family(1)), family(3), schedule = (0, 2))
+
+    with pytest.raises(AssertionError, match = 'non-empty'):
+        build_difficulty_bank((), family(3))
+
 def test_variance_and_uniform_score_fns():
     p = torch.tensor([0.0, 0.5, 1.0, float('nan')])
     counts = torch.tensor([5, 5, 5, 0])
@@ -75,6 +240,18 @@ def test_variance_and_uniform_score_fns():
     assert torch.allclose(u_weights, torch.ones(4))
 
 # sampler tests
+
+def test_sgs_sampler_frontier_names_and_paper_aliases():
+    configs = [np.array([0.]), np.array([1.]), np.array([2.])]
+    named = SGSSampler(configs, frontier_success_rate = .4, kernel_sharpness = 3., seed = 0)
+    paper = SGSSampler(configs, target = .4, kappa = 3., seed = 0)
+
+    for sampler in (named, paper):
+        sampler.update([0, 1, 2], [1., .5, 0.])
+
+    assert named.frontier_success_rate == named.target == .4
+    assert named.kernel_sharpness == named.kappa == 3.
+    assert torch.allclose(named.probs, paper.probs)
 
 def test_sgs_sampler_concentrates_on_frontier():
     configs = [np.array([0.1, 0.0]), np.array([0.5, 0.0]), np.array([0.9, 0.0])]
@@ -469,7 +646,7 @@ class AutoResettingGoalEnv(ConfigurableGoalEnv):
 def test_sgs_wrapper_autoreset_without_slot_reset_does_not_credit_configs():
     configs = [np.array([0.2, 0.0]), np.array([0.8, 0.0])]
     env = SuccessGuidedSamplingWrapper(StandardizeEnvWrapper(AutoResettingGoalEnv), reset_configs = configs, seed = 0)
-    assert env.autoresets and not hasattr(env.env, 'reset_at')
+    assert env.autoresets and reset_env_at(env.env, 0) is None
 
     env.reset()
     for _ in range(12):
@@ -478,6 +655,46 @@ def test_sgs_wrapper_autoreset_without_slot_reset_does_not_credit_configs():
     # only the explicitly initialized episode count is credited, not the env's own autoreset episodes
 
     assert int(env.counts.sum().item()) == 1
+
+def test_sgs_wrapper_autoresets_single_env_without_env_autoreset():
+    # an AsyncVectorEnv worker is a single env with no slot-reset path; the
+    # wrapper can own the reset and apply the next sampled config itself
+    configs = [np.array([0.2, 0.0]), np.array([0.8, 0.0])]
+    env = SuccessGuidedSamplingWrapper(
+        StandardizeEnvWrapper(ConfigurableGoalEnv),
+        reset_configs = configs,
+        autoresets = True,
+        seed = 0,
+    )
+
+    obs, _ = env.reset()
+    for _ in range(6):
+        obs, _, terminated, truncated, _ = env.step(torch.zeros(1, 2))
+        if bool(terminated.any()) or bool(truncated.any()):
+            idx = int(env.current_config_ids[0])
+            assert idx in (0, 1)
+            assert np.allclose(obs.numpy().reshape(-1), configs[idx])
+
+    assert int(env.counts.sum().item()) >= 3
+
+def test_sgs_wrapper_can_disable_reseeding():
+    configs = [np.array([0.2, 0.0]), np.array([0.8, 0.0])]
+    env = SuccessGuidedSamplingWrapper(
+        StandardizeEnvWrapper(ConfigurableGoalEnv),
+        reset_configs = configs,
+        autoresets = False,
+        seed = 0,
+    )
+
+    env.reset()
+    initial = env.current_config_ids.copy()
+
+    for _ in range(2):
+        _, _, terminated, truncated, _ = env.step(torch.zeros(1, 2))
+
+    assert np.array_equal(env.current_config_ids, initial)
+    assert int(env.counts.sum().item()) == 1
+    assert bool(terminated.any()) or bool(truncated.any())
 
 def test_sgs_wrapper_set_state_fn_still_credits_configs():
     reset_ids = []
@@ -533,3 +750,32 @@ def test_sgs_wrapper_default_p_on_autoreset_does_not_credit():
         env.step(torch.zeros(1, 2))
 
     assert int(env.counts.sum().item()) == 0
+
+# realistic PushT samples: easy / medium / hard, one bank per task
+
+PUSHT2D_BANK = np.array([
+    [272.97055, 239.02942, 226.30151, 240.69849, 0.7853982],
+    [170.81690, 177.15855, 288.44583, 263.36810, 0.7077053],
+    [438.00000, 341.00000, 289.00000, 263.00000, 2.7336407],
+], dtype = np.float32)
+
+PUSHT3D_BANK = np.array([
+    [-0.317898, 0.248795, -1.047198, -0.313688, 0.239724, -1.047198, 0.370400, 0.282700, 0.417400, -2.759700, -0.277800, 3.205000, 2.116500],
+    [-0.149759, 0.010774, -0.971576, -0.180564, 0.055424, -1.047198, 0.543312, 0.239741, 0.165077, -2.625493, 0.068437, 2.994516, 1.857625],
+    [-0.250336, -0.162715, -2.069528, -0.156000, -0.100000, -1.047198, 0.669030, 0.230069, 0.087880, -2.699870, -0.133435, 2.888845, 1.677404],
+], dtype = np.float32)
+
+@pytest.mark.parametrize('bank, state_dim', [(PUSHT2D_BANK, 5), (PUSHT3D_BANK, 13)], ids = ['pusht2d', 'pusht3d'])
+def test_sgs_realistic_easy_medium_hard(bank, state_dim):
+    assert bank.shape == (3, state_dim)
+    assert np.isfinite(bank).all()
+
+    sampler = SGSSampler(bank, target = .5, kappa = 2., eps = .05, window = 5, seed = 0)
+
+    for _ in range(2):
+        sampler.update([0, 1, 2], [1., .5, 0.])
+
+    probs = sampler.probs
+    assert probs.shape == (3,)
+    assert torch.isclose(probs.sum(), torch.tensor(1.), atol = 1e-6)
+    assert int(probs.argmax()) == 1

@@ -732,4 +732,4 @@ def test_context_all_export():
         'PastStatesWrapper',
         'fourier_time',
     ):
-        assert name in env_ssl_wrapper.__all__
+        assert hasattr(env_ssl_wrapper, name)

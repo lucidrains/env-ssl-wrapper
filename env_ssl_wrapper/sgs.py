@@ -8,8 +8,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 import torch
-from torch import is_tensor
-from torch.utils._pytree import tree_map
+import torch.nn.functional as F
 
 from .standardize.helpers import (
     EnvWrapper,
@@ -22,12 +21,12 @@ from .standardize.helpers import (
     env_num_envs,
     exists,
     first_existing,
-    get_attr,
     is_vectorized,
     normalize_reset_out,
     normalize_step_out,
     to_numpy,
 )
+from .standardize.seeding import reset_env_at, write_slot_obs
 
 # helpers
 
@@ -72,40 +71,6 @@ def default_success_fn(obs, reward, terminated, truncated, info):
 
     return terminated
 
-def write_slot_obs(obs, slot_obs, idx: int):
-    def _write(batch_leaf, single_leaf):
-        if is_tensor(batch_leaf):
-            val = torch.as_tensor(single_leaf, device = batch_leaf.device, dtype = batch_leaf.dtype)
-            batch_leaf[idx] = val.reshape(batch_leaf[idx].shape)
-            return batch_leaf
-
-        if isinstance(batch_leaf, np.ndarray):
-            val = np.asarray(single_leaf, dtype = batch_leaf.dtype)
-            batch_leaf[idx] = val.reshape(batch_leaf[idx].shape)
-            return batch_leaf
-
-        return batch_leaf
-
-    return tree_map(_write, obs, slot_obs)
-
-def try_reset_slot(env, idx: int, options: dict):
-    curr = env
-    while exists(curr):
-        reset_at = first_existing(curr, 'reset_at', 'reset_one')
-        if callable(reset_at):
-            out = reset_at(idx, options = options)
-            obs_i, _ = normalize_reset_out(out)
-            return obs_i
-
-        envs = get_attr(curr, 'envs')
-        if isinstance(envs, (list, tuple)) and idx < len(envs):
-            obs_i, _ = normalize_reset_out(envs[idx].reset(options = options))
-            return obs_i
-
-        curr = get_attr(curr, 'env') if isinstance(curr, EnvWrapper) else None
-
-    return None
-
 # curriculum score functions
 # Success-Guided Sampling (SGS) - Octi Zhang et al.
 # https://arxiv.org/abs/2610.12465
@@ -130,7 +95,8 @@ def sgs_score_fn(
     alpha = kappa * target
     beta = kappa * (1. - target)
 
-    weights = ((p_clamped + eps) ** alpha) * ((1. - p_clamped + eps) ** beta)
+    peak = ((target + eps) ** alpha) * ((1. - target + eps) ** beta)
+    weights = (((p_clamped + eps) ** alpha) * ((1. - p_clamped + eps) ** beta)) / max(float(peak), 1e-12)
     unvisited = torch.full_like(weights, float(unvisited_weight))
 
     if exists(counts):
@@ -160,6 +126,175 @@ def uniform_score_fn(
 ) -> torch.Tensor:
     return torch.ones_like(p, dtype = torch.float32)
 
+# ladder / difficulty frontier scores
+#
+# `positions` is either rung index or an explicit difficulty.  Both scores share
+# one rule, so replicas and non-uniform rungs behave the same.
+
+def _scores(p, counts):
+    p = torch.as_tensor(p).reshape(-1).float()
+    counts = None if not exists(counts) else torch.as_tensor(counts, device = p.device).reshape(-1)
+    assert counts is None or counts.numel() == p.numel(), f'counts length {counts.numel()} must match p length {p.numel()}'
+    return p, counts
+
+def _smooth(x, kernel):
+    return F.avg_pool1d(x.reshape(1, 1, -1), kernel, 1, kernel // 2).reshape(-1) if x.numel() >= kernel else x
+
+def _frontier(p, counts, positions, *, threshold = .25, min_count = 2, kernel = 5, fallback = 0., mask = None):
+    assert 0. <= threshold <= 1., f'threshold must be within [0, 1], got {threshold}'
+    assert kernel >= 1 and kernel % 2 == 1, f'kernel must be a positive odd integer, got {kernel}'
+    assert min_count >= 0, f'min_count must be non-negative, got {min_count}'
+
+    p, counts = _scores(p, counts)
+    positions = torch.as_tensor(positions, dtype = p.dtype, device = p.device).reshape(-1)
+    assert positions.numel() == p.numel(), f'positions length {positions.numel()} must match p length {p.numel()}'
+
+    if exists(mask):
+        mask = torch.as_tensor(mask, dtype = torch.bool, device = p.device).reshape(-1)
+        assert mask.numel() == p.numel(), f'frontier_mask length {mask.numel()} must match p length {p.numel()}'
+        p, positions = p[mask], positions[mask]
+        counts = counts[mask] if exists(counts) else None
+
+    if p.numel() == 0:
+        return float(fallback)
+
+    assert torch.isfinite(positions).all(), 'positions must be finite'
+
+    p = torch.where(counts >= min_count, p.nan_to_num(0.), torch.zeros_like(p)) if exists(counts) else p.nan_to_num(0.)
+    levels = positions.unique(sorted = True)
+    rates = _smooth(torch.stack([p[positions == level].mean() for level in levels]), kernel)
+    hit = (rates >= threshold).nonzero().flatten()
+
+    return float(levels[hit[-1]]) if hit.numel() else float(fallback)
+
+def ladder_frontier_index(p, counts = None, *, threshold = .25, min_count = 2, kernel = 5, fallback = 4):
+    """Largest index whose smoothed success rate clears `threshold`."""
+    p = torch.as_tensor(p).reshape(-1)
+    if p.numel() == 0:
+        return 0
+
+    idx = torch.arange(p.numel(), device = p.device)
+    fallback = min(max(int(fallback), 0), p.numel() - 1)
+    return int(_frontier(p, counts, idx, threshold = threshold, min_count = min_count, kernel = kernel, fallback = fallback))
+
+def difficulty_frontier(p, counts, difficulty, *, threshold = .25, min_count = 2, kernel = 5, fallback = .05, frontier_mask = None):
+    """Largest difficulty whose aggregated success rate clears `threshold`."""
+    return _frontier(p, counts, difficulty, threshold = threshold, min_count = min_count, kernel = kernel, fallback = fallback, mask = frontier_mask)
+
+def _frontier_score(
+    p, counts, positions,
+    *,
+    target = .35,
+    kappa = 4.,
+    eps = 1e-4,
+    unvisited_weight = .25,
+    probe_offset = .03,
+    probe_width = .04,
+    probe_gain = .65,
+    retain_weight = .35,
+    envelope_span = .09,
+    envelope_width = .04,
+    threshold = .25,
+    min_count = 2,
+    kernel = 5,
+    fallback = .05,
+    mask = None
+):
+    assert probe_width > 0. and envelope_width > 0., 'probe_width and envelope_width must be positive'
+    assert probe_offset >= 0. and envelope_span >= 0., 'probe_offset and envelope_span must be non-negative'
+    assert probe_gain >= 0. and retain_weight >= 0., 'probe_gain and retain_weight must be non-negative'
+
+    p, counts = _scores(p, counts)
+    positions = torch.as_tensor(positions, dtype = p.dtype, device = p.device).reshape(-1)
+    star = _frontier(p, counts, positions, threshold = threshold, min_count = min_count, kernel = kernel, fallback = fallback, mask = mask)
+
+    base = sgs_score_fn(p, counts, target = target, kappa = kappa, eps = eps, unvisited_weight = unvisited_weight)
+    probe = probe_gain * torch.exp(-.5 * ((positions - (star + probe_offset)) / probe_width) ** 2)
+    retain = torch.where(positions <= star, torch.full_like(positions, retain_weight), torch.zeros_like(positions))
+    envelope = torch.where(positions <= star + envelope_span, torch.ones_like(positions),
+                           torch.exp(-(positions - (star + envelope_span)) / envelope_width))
+
+    return torch.maximum(torch.maximum(base * envelope, probe), retain)
+
+def ladder_score_fn(p, counts = None, *, probe_offset = 5., probe_width = 6., envelope_span = 15., envelope_width = 6., fallback = 4, **kwargs):
+    """Frontier score over an index-ordered bank."""
+    p = torch.as_tensor(p).reshape(-1)
+    if p.numel() == 0:
+        return p.float()
+
+    idx = torch.arange(p.numel(), device = p.device)
+    fallback = min(max(int(fallback), 0), p.numel() - 1)
+    return _frontier_score(
+        p, counts, idx,
+        probe_offset = probe_offset, probe_width = probe_width,
+        envelope_span = envelope_span, envelope_width = envelope_width,
+        fallback = fallback, **kwargs,
+    )
+
+def difficulty_score_fn(p, counts = None, *, difficulty, normalize_groups = True, frontier_mask = None, **kwargs):
+    """Frontier score over a bank with an explicit difficulty per config."""
+    p = torch.as_tensor(p).reshape(-1)
+    if p.numel() == 0:
+        return p.float()
+
+    d = torch.as_tensor(difficulty).reshape(-1)
+    assert d.numel() == p.numel(), f'difficulty length {d.numel()} must match p length {p.numel()}'
+
+    weights = _frontier_score(p, counts, difficulty, mask = frontier_mask, **kwargs)
+
+    if normalize_groups:
+        d = torch.as_tensor(difficulty, dtype = weights.dtype, device = weights.device).reshape(-1)
+        levels = d.unique(sorted = True)
+        group = torch.stack([(d == level).sum() for level in levels]).to(weights.dtype)
+        weights = weights / group[torch.searchsorted(levels, d)]
+
+    return weights
+
+# bank construction
+#
+# A task-independent ladder: cycle through generator factories at
+# `(i / (n - 1)) ** exponent`, then append the native tail.  `schedule` is a
+# sequence of indices into `generators`; omit it to cycle all generators in order.
+
+def build_difficulty_bank(
+    generators: Sequence[Callable[[float], Callable]],
+    native_config: Callable,
+    *,
+    ladder_size: int = 120,
+    native_size: int = 56,
+    exponent: float = 1.35,
+    max_difficulty: float = 1.,
+    schedule: Sequence[int] | None = None
+) -> tuple[list, np.ndarray, np.ndarray]:
+    """
+    Build a difficulty-ordered reset bank followed by `native_size` native
+    configs.  Returns `(configs, difficulty, native_mask)`.
+    """
+    assert ladder_size >= 2, f'ladder_size must be at least 2, got {ladder_size}'
+    assert native_size >= 0, f'native_size must be non-negative, got {native_size}'
+    assert exponent > 0., f'exponent must be positive, got {exponent}'
+    assert 0. < max_difficulty <= 1., f'max_difficulty must be within (0, 1], got {max_difficulty}'
+
+    generators = list(generators)
+    assert generators and all(map(callable, generators)), 'generators must be a non-empty sequence of callables'
+    assert callable(native_config), 'native_config must be callable'
+
+    schedule = list(range(len(generators))) if not exists(schedule) else [int(i) for i in schedule]
+    assert schedule and all(0 <= i < len(generators) for i in schedule), f'invalid schedule {schedule}'
+
+    ladder, difficulty = [], []
+
+    for i in range(ladder_size):
+        w = float((i / (ladder_size - 1)) ** exponent * max_difficulty)
+        ladder.append(generators[schedule[i % len(schedule)]](w))
+        difficulty.append(w)
+
+    configs = ladder + [native_config] * native_size
+    difficulty = np.asarray(difficulty + [1.] * native_size, dtype = np.float32)
+    native = np.asarray([False] * ladder_size + [True] * native_size, dtype = bool)
+
+    return configs, difficulty, native
+
 # default sampling function
 
 def sgs_sample_fn(
@@ -180,9 +315,12 @@ class SGSSampler:
     Success-Guided Sampling (SGS) curriculum sampler over a bank of reset configurations.
     Proposed by Octi Zhang et al. (https://arxiv.org/abs/2610.12465).
 
-    The default sampling distribution is the paper's Eq. (2): the beta kernel around `target`
-    evaluated at the success rates (`sgs_score_fn`), floored at `eps`, logits formed, and
-    softmaxed at `temperature` (floored at 1, the paper uses 2.), drawn by `sgs_sample_fn`.
+    The default sampling distribution is the paper's Eq. (2): the beta kernel around
+    `frontier_success_rate` (paper: `target`) with sharpness `kernel_sharpness`
+    (paper: `kappa`), evaluated at the success rates (`sgs_score_fn`), floored at `eps`,
+    logits formed, and softmaxed at `temperature` (floored at 1, the paper uses 2.),
+    drawn by `sgs_sample_fn`.  `target` / `kappa` remain keyword aliases.
+
     Swap either hook - `score_fn` reshapes the scores, `sample_fn` picks the distribution -
     each is handed, by name, whatever it declares of `p`, `counts`, `history`, `configs`,
     `weights`, `probs`, `rng`, `size`, `step`, `window` and the hparams.
@@ -194,8 +332,11 @@ class SGSSampler:
     def __init__(
         self,
         configs: Sequence | np.ndarray | torch.Tensor,
-        target: float | Callable[[int], float] = 0.5,
-        kappa: float | Callable[[int], float] = 2.,
+        *,
+        frontier_success_rate: float | Callable[[int], float] = 0.5,
+        kernel_sharpness: float | Callable[[int], float] = 2.,
+        target: float | Callable[[int], float] | None = None,
+        kappa: float | Callable[[int], float] | None = None,
         eps: float = 0.05,
         window: int = 20,
         unvisited_weight: float = 1.,
@@ -215,8 +356,11 @@ class SGSSampler:
         assert eps > 0., f'eps must be positive, got {eps}'
         assert not exists(log_every) or log_every >= 1, f'log_every must be at least 1, got {log_every}'
 
-        self.target = target
-        self.kappa = kappa
+        # paper aliases: target / kappa
+        self.target = target if exists(target) else frontier_success_rate
+        self.kappa = kappa if exists(kappa) else kernel_sharpness
+        self.frontier_success_rate = self.target
+        self.kernel_sharpness = self.kappa
         self.eps = float(eps)
         self.window = int(window)
         self.unvisited_weight = float(unvisited_weight)
@@ -420,12 +564,17 @@ class SGSSampler:
 
 # wrapper
 
-class SuccessGuidedSamplingWrapper(EnvWrapper):
+class SGSWrapper(EnvWrapper):
     """
-    Success-Guided Sampling (SGS) environment wrapper (Octi Zhang et al., https://arxiv.org/abs/2610.12465).
-    Wraps on top of StandardizeEnvWrapper (or any single / vectorized environment) to adaptively sample
-    initial reset states at the policy's frontier of competence and track per-config success rates.
-    Pass `log_every` / `log_path` to record the progression of the bank (see `SGSSampler`).
+    Success-Guided Sampling (SGS) environment wrapper.
+
+    ```python
+    env = SGSWrapper(env, bank, frontier_success_rate = .5)
+    ```
+
+    `bank` holds reset states or callables `(rng) -> state`.  Score/sampler
+    hyperparameters are forwarded to `SGSSampler`; `set_state_fn` is only needed
+    when the env cannot reset from `options`.
     """
 
     priority = 110
@@ -433,200 +582,158 @@ class SuccessGuidedSamplingWrapper(EnvWrapper):
     def __init__(
         self,
         env,
-        reset_configs: Sequence | np.ndarray | torch.Tensor | SGSSampler,
-        target: float | Callable[[int], float] = 0.5,
-        kappa: float | Callable[[int], float] = 2.,
-        eps: float = 0.05,
-        window: int = 20,
-        unvisited_weight: float = 1.,
-        temperature: float | Callable[[int], float] = 1.,
-        uniform_prob: float | Callable[[int], float] = 0.,
-        default_prob: float | Callable[[int], float] = 0.,
-        score_fn: Callable | None = None,
-        sample_fn: Callable | None = None,
-        state_transform: Callable | None = None,
+        configs = None,
+        *,
+        reset_configs = None,
         success_fn: Callable | None = None,
-        harvest_fn: Callable | None = None,
-        reset_options_fn: Callable | None = None,
         set_state_fn: Callable | None = None,
+        reset_options_fn: Callable | None = None,
+        harvest_fn: Callable | None = None,
         options_key: str = 'reset_to_state',
-        log_every: int | None = None,
-        log_path: str | os.PathLike | None = None,
+        autoresets: bool | None = None,
         enabled: bool = True,
-        seed: int | None = None,
+        **sampler_kwargs,
     ):
         super().__init__(env)
 
-        if isinstance(reset_configs, SGSSampler):
-            self.sampler = reset_configs
-        else:
-            self.sampler = SGSSampler(
-                configs = reset_configs,
-                target = target,
-                kappa = kappa,
-                eps = eps,
-                window = window,
-                unvisited_weight = unvisited_weight,
-                temperature = temperature,
-                uniform_prob = uniform_prob,
-                default_prob = default_prob,
-                score_fn = score_fn,
-                sample_fn = sample_fn,
-                state_transform = state_transform,
-                log_every = log_every,
-                log_path = log_path,
-                seed = seed,
-            )
+        configs = default(configs, reset_configs)
+        assert exists(configs), 'configs is required'
 
+        self.sampler = configs if isinstance(configs, SGSSampler) else SGSSampler(configs, **sampler_kwargs)
         self.success_fn = success_fn if exists(success_fn) else default_success_fn
-        self.harvest_fn = harvest_fn
-        self.reset_options_fn = reset_options_fn
         self.set_state_fn = set_state_fn
+        self.reset_options_fn = reset_options_fn
+        self.harvest_fn = harvest_fn
         self.options_key = options_key
         self.enabled = enabled
 
         self.num_envs = env_num_envs(env)
         self.is_vector = is_vectorized(env)
-        self.autoresets = env_autoresets(env)
+        env_autoreset = env_autoresets(env)
+        self.autoresets = default(autoresets, env_autoreset)
+        self._owns_reset = bool(self.autoresets) and not env_autoreset
 
         self.current_config_ids = np.full(self.num_envs, -1, dtype = int)
         self.current_states: list = [None] * self.num_envs
         self._done_since_reset = np.zeros(self.num_envs, dtype = bool)
 
     @property
-    def success_rates(self) -> torch.Tensor:
+    def success_rates(self):
         return self.sampler.success_rates
 
     @property
-    def weights(self) -> torch.Tensor:
+    def weights(self):
         return self.sampler.weights
 
     @property
-    def probs(self) -> torch.Tensor:
+    def probs(self):
         return self.sampler.probs
 
     @property
-    def counts(self) -> torch.Tensor:
+    def counts(self):
         return self.sampler.counts
 
     @property
-    def trace(self) -> list[dict]:
+    def trace(self):
         return self.sampler.trace
 
-    def _build_options(self, state, cfg_id) -> dict:
+    def _ids(self):
+        return self.current_config_ids.copy() if self.is_vector else int(self.current_config_ids[0])
+
+    def _options(self, state, cfg_id):
         if exists(self.reset_options_fn):
             return call_hook(self.reset_options_fn, state, cfg_id)
         return {self.options_key: state}
 
-    def _format_config_id_info(self):
-        return self.current_config_ids.copy() if self.is_vector else int(self.current_config_ids[0])
+    def _apply(self, i, state, cfg_id, obs):
+        # returns (state_reached, obs)
+
+        if exists(self.set_state_fn):
+            return True, default(call_hook(self.set_state_fn, self.env, state, cfg_id, obs), obs)
+
+        if self._owns_reset and self.num_envs == 1:
+            out = normalize_reset_out(self.env.reset(options = self._options(state, cfg_id)))
+            return exists(out) and exists(out[0]), out[0]
+
+        out = reset_env_at(self.env, i, options = self._options(state, cfg_id))
+        if not exists(out):
+            return False, obs
+
+        slot_obs, _ = out
+        return True, write_slot_obs(obs, slot_obs, i)
 
     def reset(self, **kwargs):
-        user_options = kwargs.get('options')
-        explicit = isinstance(user_options, dict) and (
-            self.options_key in user_options or 'config_id' in user_options
-        )
+        options = kwargs.get('options')
+        explicit = isinstance(options, dict) and (self.options_key in options or 'config_id' in options)
 
         if self.enabled and not explicit:
             states, ids = self.sampler.sample(batch_size = self.num_envs)
             ids = np.asarray(ids, dtype = int)
         else:
-            cid = user_options.get('config_id', -1) if isinstance(user_options, dict) else -1
+            cid = options.get('config_id', -1) if isinstance(options, dict) else -1
             states = [None] * self.num_envs
-            ids = np.broadcast_to(np.asarray(cid, dtype = int), (self.num_envs,)).copy()
+            ids = np.full(self.num_envs, cid, dtype = int)
 
         self.current_config_ids, self.current_states = ids, list(states)
-
-        arg_state = states[0] if self.num_envs == 1 else states
-        arg_id = int(ids[0]) if self.num_envs == 1 else ids
+        state = states[0] if self.num_envs == 1 else states
+        cfg_id = int(ids[0]) if self.num_envs == 1 else ids
         inject = self.enabled and not explicit and any(map(exists, states))
 
         if inject and not exists(self.set_state_fn):
-            kwargs['options'] = {**(user_options or {}), **self._build_options(arg_state, arg_id)}
+            kwargs['options'] = {**(options or {}), **self._options(state, cfg_id)}
 
         obs, info = normalize_reset_out(self.env.reset(**kwargs))
 
         if inject and exists(self.set_state_fn):
-            obs = default(call_hook(self.set_state_fn, self.env, arg_state, arg_id, obs), obs)
+            obs = default(call_hook(self.set_state_fn, self.env, state, cfg_id, obs), obs)
 
-        self._done_since_reset = np.zeros(self.num_envs, dtype = bool)
-
+        self._done_since_reset[:] = False
         info = dict(info) if isinstance(info, dict) else {}
-        info['sgs_config_id'] = self._format_config_id_info()
-
+        info['sgs_config_id'] = self._ids()
         return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         info = dict(info) if isinstance(info, dict) else {}
-
-        # record the config ids that produced this step before any autoreset slot updates
-
-        step_config_ids = self._format_config_id_info()
-        info['sgs_config_id'] = step_config_ids
+        info['sgs_config_id'] = self._ids()
 
         if exists(self.harvest_fn):
             harvested = call_hook(self.harvest_fn, obs, reward, terminated, truncated, info)
-            if exists(harvested):
-                for cfg in (harvested if isinstance(harvested, (list, tuple)) else [harvested]):
-                    self.sampler.add_config(cfg)
+            harvested = harvested if isinstance(harvested, (list, tuple)) else [harvested]
+            for cfg in filter(exists, harvested):
+                self.sampler.add_config(cfg)
 
-        done = dones_of(terminated, truncated)
-        if not any_true(done):
-            return obs, reward, terminated, truncated, info
-
-        done_np = to_numpy(done).astype(bool).reshape(-1)
-        if len(done_np) < self.num_envs:
-            done_np = np.broadcast_to(done_np, (self.num_envs,)).copy()
-
-        newly_done = done_np if self.autoresets else (done_np & ~self._done_since_reset)
-        self._done_since_reset |= done_np
+        done = to_numpy(dones_of(terminated, truncated)).astype(bool).reshape(-1)
+        done = np.broadcast_to(done, (self.num_envs,)).copy() if len(done) < self.num_envs else done
+        newly_done = done if self.autoresets else (done & ~self._done_since_reset)
+        self._done_since_reset |= done
 
         if not newly_done.any():
             return obs, reward, terminated, truncated, info
 
-        raw_success = call_hook(self.success_fn, obs, reward, terminated, truncated, info)
-        succ_np = to_numpy(raw_success).astype(np.float32).reshape(-1)
+        success = to_numpy(call_hook(self.success_fn, obs, reward, terminated, truncated, info)).astype(np.float32).reshape(-1)
+        success = np.broadcast_to(success, (self.num_envs,)).copy() if len(success) == 1 and self.num_envs > 1 else success
 
-        if len(succ_np) == 1 and self.num_envs > 1:
-            succ_np = np.broadcast_to(succ_np, (self.num_envs,)).copy()
-
-        done_indices = np.where(newly_done)[0]
-        self.sampler.update(self.current_config_ids[done_indices], succ_np[done_indices])
-
-        # for autoresetting environments, immediately sample next frontier config for each finished slot
+        self.sampler.update(self.current_config_ids[newly_done], success[newly_done])
 
         if self.enabled and self.autoresets:
-            for i in done_indices:
-                obs = self.reseed_slot(int(i), obs)
+            for i in np.flatnonzero(newly_done):
+                obs = self._reseed(int(i), obs)
 
         return obs, reward, terminated, truncated, info
 
-    def reseed_slot(self, i: int, obs):
+    def _reseed(self, i, obs):
         state, cfg_id = self.sampler.sample()
-
-        # default arm: the env has already reset itself, leave the slot unset
 
         if not exists(state):
             self.current_config_ids[i], self.current_states[i] = -1, None
             return obs
 
-        if exists(self.set_state_fn):
-            reset_ok = True
-            obs = default(call_hook(self.set_state_fn, self.env, state, cfg_id, obs), obs)
-        else:
-            slot_obs = try_reset_slot(self.env, i, self._build_options(state, cfg_id))
-            reset_ok = exists(slot_obs)
-
-            if reset_ok:
-                obs = write_slot_obs(obs, slot_obs, i)
-
-        # only credit the sampled config when its state actually reached the env
-
-        self.current_config_ids[i] = cfg_id if reset_ok else -1
-        self.current_states[i] = state if reset_ok else None
+        ok, obs = self._apply(i, state, cfg_id, obs)
+        self.current_config_ids[i] = cfg_id if ok else -1
+        self.current_states[i] = state if ok else None
         return obs
 
 # aliases
 
-SGSWrapper = SuccessGuidedSamplingWrapper
+SuccessGuidedSamplingWrapper = SGSWrapper

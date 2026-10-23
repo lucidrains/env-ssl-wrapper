@@ -183,6 +183,22 @@ class AutoBatchedWrapper(EnvWrapper):
 
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        if self.is_vector:
+            return out
+
+        obs, info = out
+        obs = maybe_expand_dim(obs)
+        maybe_transform_final_observation(info, maybe_expand_dim)
+        return obs, info
+
     def step(self, action):
         action = maybe_squeeze_dim(action, shape_tree = self.action_shape_tree, is_vector = self.is_vector, prepend_batch = self.prepend_batch)
         out = self.env.step(action)

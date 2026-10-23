@@ -51,8 +51,8 @@ def get_wrapper(name):
         return PastStatesWrapper
 
     if name in ('sgs', 'success_guided_sampling'):
-        from ..sgs import SuccessGuidedSamplingWrapper
-        return SuccessGuidedSamplingWrapper
+        from ..sgs import SGSWrapper
+        return SGSWrapper
 
     if name in ('state_norm', 'normalize_state', 'normalization'):
         from ..normalize import StateNormalizationWrapper

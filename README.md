@@ -294,36 +294,58 @@ uv run train_cartpole.py    # both arms converge to a perfect greedy 500.0
 
 ### Success-Guided Sampling
 
-Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `target` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2610.12465))
+Adaptive curriculum over a bank of reset states, keeping episodes near the policy's frontier of competence — the configurations it currently solves about `frontier_success_rate` of the time ([Octi Zhang et al., 2026](https://arxiv.org/abs/2610.12465))
 
 ```python
 import gymnasium as gym
 import torch
-from env_ssl_wrapper import StandardizeEnvWrapper, SuccessGuidedSamplingWrapper
+from env_ssl_wrapper import StandardizeEnvWrapper, SGSWrapper
 
 reset_states = [torch.zeros(4), torch.ones(4)]  # bank of reset states to sample over
 
 env = StandardizeEnvWrapper(gym.make('CartPole-v1'))
-env = SuccessGuidedSamplingWrapper(env, reset_configs = reset_states, target = 0.5, kappa = 2.)
+env = SGSWrapper(env, reset_states, frontier_success_rate = 0.5, kernel_sharpness = 2.)
 
 obs, info = env.reset()
 # info['sgs_config_id'] -> the config this episode started from (success rates update on episode end)
 ```
 
-`reset_configs` holds reset states — or callables drawing one (`lambda rng: ...`) — passed through `options`, or built by a `reset_options_fn` / `state_transform`.
+`configs` holds reset states — or callables drawing one (`lambda rng: ...`) — passed through `options`, or built by a `reset_options_fn` / `state_transform`.  `reset_configs` is accepted as an alias.
 
-The score equation is swappable: the default beta shaped kernel around `target` (`sgs_score_fn`) is simply one rule of the bank's state. Whatever you pass as `score_fn` is handed, by name, the arguments it declares — `p` (per state success rates), `counts`, `history` (the raw episode outcomes), `step`, `window`, and the hparams `target`, `kappa`, `eps`, `unvisited_weight`.
+For a bank ordered by difficulty, `build_difficulty_bank` composes a ladder from generator factories and appends the native tail, and `difficulty_score_fn` scores against an explicit difficulty — so replicas at one difficulty and non-uniform rungs do not distort the frontier:
+
+```python
+from functools import partial
+from env_ssl_wrapper import SGSWrapper, build_difficulty_bank, difficulty_score_fn
+
+configs, difficulty, native = build_difficulty_bank(
+    (curriculum, runway, circumnav),
+    native,
+    schedule = (0, 1, 0, 2),   # optional generator cycle
+)
+
+env = SGSWrapper(
+    env,
+    configs,
+    frontier_success_rate = .35,
+    score_fn = partial(difficulty_score_fn, difficulty = difficulty),
+)
+```
+
+For a non-autoresetting worker — e.g. a simulator inside `AsyncVectorEnv` with `autoreset_mode='Disabled'` — pass `autoresets = True` to `SGSWrapper`, so it resets the worker itself and the next episode starts from the sampled config.
+
+The score equation is swappable: the default beta shaped kernel around `frontier_success_rate` (paper: `target`; `sgs_score_fn`) is simply one rule of the bank's state. Whatever you pass as `score_fn` is handed, by name, the arguments it declares — `p` (per state success rates), `counts`, `history` (the raw episode outcomes), `step`, `window`, and the hparams `target`, `kappa`, `eps`, `unvisited_weight` (the `target` / `kappa` names are the paper aliases for `frontier_success_rate` / `kernel_sharpness`).
 
 The sampling distribution is swappable too: the default follows the paper's Eq. (2) — the beta shape the score produces is floored at `eps`, logits are formed and softmaxed at `temperature` (floored at 1; the paper uses 2.) — and `sgs_sample_fn` draws i.i.d. from those `probs`. A custom `sample_fn` is handed, by name, whatever it declares — `p`, `counts`, `history`, `configs`, `weights` (the raw kernel), `probs` (floored and tempered), `rng`, `size`, `step`, `temperature`, and the hparams — so any distribution of the bank can be plugged in.
 
-The rest of the loop is hookable as well: target and temperature schedules, uniform floor (`uniform_prob`), env-native fallback (`default_prob`), success signal (`success_fn`).
+The rest of the loop is hookable as well: frontier-success and temperature schedules, uniform floor (`uniform_prob`), env-native fallback (`default_prob`), success signal (`success_fn`).
 
 Track the curriculum as it runs — one snapshot of the bank per credited episode, kept in memory and appended to a csv when `log_path` is set:
 
 ```python
-env = SuccessGuidedSamplingWrapper(
+env = SGSWrapper(
     StandardizeEnvWrapper(gym.make('CartPole-v1')),
-    reset_configs = reset_states,
+    reset_states,
     log_every = 1,                  # snapshot every episode (None turns logging off)
     log_path = 'sgs_progression.csv',
 )
@@ -356,7 +378,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `past_action` | Supplies the last action, or the last n with `num_past_actions`. `('past_action', dict(num_past_actions = 2))` |
 | `past_state` | Supplies the last state, or the last n with `num_past_states`. `('past_state', dict(num_past_states = 5))` |
 | `state_norm` | Running mean / std normalization of states, live or deferred until the learner updates. `('state_norm', dict(update_mode = 'deferred'))` |
-| `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(reset_configs = configs, target = 0.5, kappa = 2.))` |
+| `sgs` | Adaptive frontier curriculum over reset configs. `('sgs', dict(configs = configs, frontier_success_rate = 0.5, kernel_sharpness = 2.))` |
 
 Every env emits the same contract: obs `torch.float32`, rewards `torch.float32`, `terminated`/`truncated` `torch.bool`. `env.seed(n)` works on every sim.
 

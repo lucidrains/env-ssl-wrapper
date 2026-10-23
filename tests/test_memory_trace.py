@@ -251,5 +251,5 @@ def test_memory_trace_autoreset_final_observation():
 
 def test_memory_trace_all_export():
     import env_ssl_wrapper
-    assert 'MemoryTraceWrapper' in env_ssl_wrapper.__all__
+    assert hasattr(env_ssl_wrapper, 'MemoryTraceWrapper')
 

@@ -80,6 +80,17 @@ class DoneTrackerWrapper(EnvWrapper):
 
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        self.reset_done([index])
+        return out
+
     def step(self, action):
         assert not self.needs_reset, 'environment needs reset before calling step. call env.reset() first'
 

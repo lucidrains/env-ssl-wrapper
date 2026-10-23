@@ -429,6 +429,19 @@ class TransformObservationWrapper(EnvWrapper):
         maybe_transform_final_observation(info, self.transform)
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        obs = self.transform(obs, done = None)
+        maybe_transform_final_observation(info, self.transform)
+        return obs, info
+
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         done = dones_of(terminated, truncated) if self.autoresets else None

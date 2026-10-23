@@ -92,6 +92,24 @@ class EpisodePaddingWrapper(EnvWrapper):
         self._final_obs = None
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at, write_slot_obs
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+
+        if exists(self._last_obs):
+            self._last_obs = write_slot_obs(self._last_obs, obs, index)
+
+        if exists(self._is_done):
+            self._is_done[index] = False
+
+        return obs, info
+
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         raw_obs = obs

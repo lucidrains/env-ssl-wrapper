@@ -10,6 +10,7 @@ from . import (
     helpers,
     image_wrapper,
     mocks,
+    seeding,
     spaces,
     standardize_wrapper,
     tensor_wrapper,
@@ -28,6 +29,7 @@ from .flatten_obs_wrapper import FlattenObsWrapper
 from .episode_padding_wrapper import EpisodePaddingWrapper
 from .time_limit_wrapper import TimeLimitWrapper
 from .vector import MultiprocessingVecEnv
+from .seeding import reset_env, reset_env_at, seed_env, write_slot_obs
 from .standardize_env_wrapper import StandardizeEnvWrapper, StandardizeEnv, StandardizedEnv
 
 from .adapters import (
@@ -118,12 +120,17 @@ __all__ = [
     'helpers',
     'image_wrapper',
     'mocks',
+    'seeding',
     'spaces',
     'standardize_wrapper',
     'tensor_wrapper',
     'time_limit_wrapper',
     'utils',
     'vector',
+    'reset_env',
+    'reset_env_at',
+    'seed_env',
+    'write_slot_obs',
     'StandardizeWrapper',
     'ImageObservationWrapper',
     'AutoBatchedWrapper',

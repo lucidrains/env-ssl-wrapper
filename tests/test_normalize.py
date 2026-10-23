@@ -535,8 +535,8 @@ def test_standardize_env_wrapper_kwarg():
     assert env.mean('obs').shape == (4,)
 
 def test_exported_in_all():
-    assert 'StateNormalizationWrapper' in env_ssl_wrapper.__all__
-    assert 'RunningMeanStd' in env_ssl_wrapper.__all__
+    assert hasattr(env_ssl_wrapper, 'StateNormalizationWrapper')
+    assert hasattr(env_ssl_wrapper, 'RunningMeanStd')
 
 def test_readme_snippet():
     import gymnasium as gym

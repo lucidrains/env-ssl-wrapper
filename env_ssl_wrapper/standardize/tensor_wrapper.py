@@ -127,6 +127,22 @@ class TensorWrapper(EnvWrapper):
 
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+
+        if self.convert_out:
+            obs = self.cast(obs)
+            self.cast_info(info)
+
+        return obs, info
+
     def to_contract(self, t, to_float = False):
         def convert(leaf):
             leaf = to_torch_leaf(leaf, self.device, cast_obs_to_float = False)
