@@ -600,14 +600,12 @@ class StateNormalizationWrapper(TransformObservationWrapper):
 
     def state_dict(self):
         return dict(
-            update_mode = self.update_mode,
             stats = {key: stats.state_dict() for key, stats in self.stats.items()},
             pending = {key: stats.state_dict() for key, stats in self.pending.items()}
         )
 
     def load_state_dict(self, state):
-        if 'update_mode' in state:
-            self.update_mode = state['update_mode']
+        # statistics only - update_mode is runtime config, the caller's always wins
 
         for group in ('stats', 'pending'):
             target = getattr(self, group)

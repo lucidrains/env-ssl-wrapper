@@ -122,9 +122,11 @@ for iteration in range(...):
     env.commit_stats()       # make this rollout's states current
 
 # evaluation runs on a frozen copy of the training statistics
-eval_env.load_state_dict(env.state_dict())
-eval_env.update_mode = 'frozen'
+eval_env = StateNormalizationWrapper(eval_env, update_mode = 'frozen')
+eval_env.load_state_dict(env.state_dict())    # statistics only - the mode stays the caller's
 ```
+
+Loading a checkpoint never changes `update_mode`, so a training checkpoint can never silently resume updating the statistics of a frozen eval env.
 
 `commit_stats()` needs no raw states: the pending accumulator holds exact sufficient statistics (count / mean / variance), so it can be stored in a memmap replay buffer as normalized states and committed at the update boundary all the same. For pipelines that keep raw states, `commit_stats(raw_states)` folds external data in — a tensor, an iterable of batches (a replay buffer dataloader), or a dict keyed by obs key.
 

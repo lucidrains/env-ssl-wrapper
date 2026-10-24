@@ -502,7 +502,6 @@ def test_wrapper_state_dict_roundtrip():
     other = StateNormalizationWrapper(MockEnv(obs_dim = 3), update_mode = 'frozen')
     other.load_state_dict(state)
 
-    assert other.update_mode == 'deferred'
     assert torch.allclose(other.mean('obs'), env.mean('obs'))
     assert torch.allclose(other.std('obs'), env.std('obs'))
     assert other.count('obs') == env.count('obs')
