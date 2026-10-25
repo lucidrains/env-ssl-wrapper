@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 import gymnasium as gym
+from einops import rearrange
 
 from env_ssl_wrapper import StandardizeEnvWrapper, compose_env
 from env_ssl_wrapper.action_chunk import ActionChunkWrapper
@@ -33,6 +34,11 @@ class StepEnv:
         terminated = self.terminate_at == self.t
         truncated = self.truncate_at == self.t
         return obs, reward, terminated, truncated, {}
+
+class InfoStepEnv(StepEnv):
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        return obs, reward, terminated, truncated, dict(info, t = self.t, hit = self.t == 1)
 
 class VectorStepEnv:
     num_envs = 3
@@ -231,7 +237,7 @@ def test_action_chunk_matches_per_step():
         if len(chunk) < 3:
             chunk = np.concatenate([chunk, np.zeros(3 - len(chunk), dtype = chunk.dtype)])
 
-        obs, reward, terminated, truncated, info = env.step(torch.tensor(chunk).unsqueeze(0))
+        obs, reward, terminated, truncated, info = env.step(rearrange(torch.tensor(chunk), '... -> 1 ...'))
         executed = info['chunk_length']
 
         if executed > remaining:
@@ -591,6 +597,226 @@ def test_action_chunk_dm_control_raw():
     assert float(reward) == 2.0
     assert info['chunk_length'] == 2
 
+# env-step trace
+
+def test_action_chunk_current_behavior_is_temporal_compression():
+    # lock the existing contract: one wrapper step = chunk_len env steps, final state only
+    env = ActionChunkWrapper(InfoStepEnv(), chunk_len = 3)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((1, 3), dtype = int))
+
+    assert info['chunk_length'] == 3
+    assert 'chunk_trace' not in info
+    assert np.allclose(obs, [3., 3.])
+    assert np.allclose(info['chunk_rewards'], [1., 2., 3.])
+
+    # only the last substep's info survives
+    assert info['t'] == 3
+    assert info['hit'] is False
+
+def test_action_chunk_chunk_length_counts_steps_not_reward_dims():
+    class SingletonRewardEnv(InfoStepEnv):
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            return obs, np.array([reward]), terminated, truncated, info
+
+    env = ActionChunkWrapper(SingletonRewardEnv(), chunk_len = 3)
+    env.reset()
+
+    _, _, _, _, info = env.step(np.zeros((1, 3), dtype = int))
+
+    assert info['chunk_length'] == 3
+    assert info['chunk_rewards'].shape == (1, 3)
+
+def test_action_chunk_trace_single_env():
+    env = ActionChunkWrapper(InfoStepEnv(), chunk_len = 3, trace_steps = True)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.array([[0, 1, 1]]))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 3
+    assert trace.chunk_len == 3
+    assert trace.is_full
+    assert len(trace) == 3
+    assert np.allclose(trace.next_observations, [[1., 1.], [2., 2.], [3., 3.]])
+    assert np.allclose(trace.actions, [0, 1, 1])
+    assert trace.action_mask.tolist() == [True, True, True]
+    assert np.allclose(trace.rewards, [1., 2., 3.])
+    assert not trace.terminated.any()
+    assert not trace.truncated.any()
+    assert not trace.dones.any()
+
+    padded, mask = trace.padded_actions()
+    assert np.allclose(padded, trace.actions)
+    assert mask.tolist() == [True, True, True]
+
+    # intermediate info is preserved - this is what the chunk-clock version drops
+    assert len(trace.infos) == 3
+    assert [i['t'] for i in trace.infos] == [1, 2, 3]
+    assert [i['hit'] for i in trace.infos] == [True, False, False]
+
+    assert np.allclose(obs, trace.next_observations[-1])
+
+def test_action_chunk_trace_early_stop():
+    env = ActionChunkWrapper(InfoStepEnv(terminate_at = 2), chunk_len = 4, trace_steps = True)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.array([[0, 1, 1, 1]]))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 2
+    assert trace.chunk_len == 4
+    assert not trace.is_full
+    assert info['chunk_length'] == 2
+    assert trace.next_observations.shape == (2, 2)
+    assert trace.terminated.tolist() == [False, True]
+    assert trace.truncated.tolist() == [False, False]
+    assert trace.dones.tolist() == [False, True]
+    assert trace.action_mask.tolist() == [True, True, False, False]
+    assert len(trace.infos) == 2
+
+    # right-pad only for transport; the mask keeps padding out of the loss
+    padded, mask = trace.padded_actions()
+    assert padded.tolist() == [0, 1, 0, 0]
+    assert mask.tolist() == [True, True, False, False]
+
+def test_action_chunk_trace_short_episode():
+    env = ActionChunkWrapper(InfoStepEnv(truncate_at = 1), chunk_len = 4, trace_steps = True)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((1, 4), dtype = int))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 1
+    assert trace.chunk_len == 4
+    assert not trace.is_full
+    assert trace.action_mask.tolist() == [True, False, False, False]
+    assert trace.next_observations.shape == (1, 2)
+    assert trace.actions.shape == (1,)
+    assert len(trace.infos) == 1
+
+def test_action_chunk_trace_box_padding():
+    env = ActionChunkWrapper(StandardizeEnvWrapper(gym.make('Pendulum-v1'), max_timesteps = 1), chunk_len = 3, trace_steps = True)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(torch.zeros(1, 3, 1))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 1
+    assert not trace.is_full
+
+    padded, mask = trace.padded_actions()
+    assert padded.shape == (1, 3, 1)
+    assert mask.shape == (1, 3)
+    assert torch.allclose(padded[:, 0], trace.actions[:, 0])
+    assert torch.all(padded[:, 1:] == 0)
+    assert mask.tolist() == [[True, False, False]]
+
+def test_action_chunk_trace_vector_env():
+    mock = VectorStepEnv(terminate_at = (2, 10, 10))
+    env = ActionChunkWrapper(mock, chunk_len = 3, trace_steps = True)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((3, 3), dtype = int))
+    trace = info['chunk_trace']
+
+    # one env is done at substep 2 -> the whole synchronous chunk stops there
+    assert trace.executed_len == 2
+    assert trace.chunk_len == 3
+    assert not trace.is_full
+    assert trace.next_observations.shape == (3, 2, 2)
+    assert trace.actions.shape == (3, 2)
+    assert trace.action_mask.shape == (3, 3)
+    assert trace.action_mask[:, :2].all() and not trace.action_mask[:, 2:].any()
+    assert trace.rewards.shape == (3, 2)
+    assert trace.terminated.shape == (3, 2)
+    assert trace.terminated[:, -1].tolist() == [True, False, False]
+    assert trace.dones[:, -1].tolist() == [True, False, False]
+    assert len(trace.infos) == 2
+
+    padded, mask = trace.padded_actions()
+    assert padded.shape == (3, 3)
+    assert mask.shape == (3, 3)
+
+@pytest.mark.parametrize('use_torch', [False, True])
+def test_action_chunk_trace_matches_per_step(use_torch):
+    seed = 0
+    actions = torch.tensor([[0, 1, 0]]) if use_torch else np.array([[0, 1, 0]])
+
+    ref = StandardizeEnvWrapper(gym.make('CartPole-v1'))
+    env = ActionChunkWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), chunk_len = 3, trace_steps = True)
+
+    ref.reset(seed = seed)
+    env.reset(seed = seed)
+
+    obs, reward, terminated, truncated, info = env.step(actions)
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 3
+
+    for i in range(trace.executed_len):
+        step_action = actions[:, i : i + 1]
+        ref_obs, ref_reward, ref_terminated, ref_truncated, _ = ref.step(step_action)
+
+        assert torch.allclose(trace.next_observations[:, i], ref_obs)
+        assert torch.allclose(trace.rewards[:, i].float(), torch.as_tensor(ref_reward).float())
+        assert bool(trace.terminated[0, i]) == bool(ref_terminated[0])
+        assert bool(trace.truncated[0, i]) == bool(ref_truncated[0])
+
+def test_action_chunk_trace_dict_obs():
+    class DictObsEnv(InfoStepEnv):
+        def reset(self, **kwargs):
+            obs, info = super().reset(**kwargs)
+            return {'x': obs}, info
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            return {'x': obs}, reward, terminated, truncated, info
+
+    env = ActionChunkWrapper(DictObsEnv(), chunk_len = 2, trace_steps = True)
+    env.reset()
+
+    obs, reward, terminated, truncated, info = env.step(np.zeros((1, 2), dtype = int))
+    trace = info['chunk_trace']
+
+    assert isinstance(obs, dict)
+    assert trace.next_observations['x'].shape == (2, 2)
+    assert np.allclose(trace.next_observations['x'], [[1., 1.], [2., 2.]])
+
+def test_action_chunk_trace_box_actions():
+    env = ActionChunkWrapper(StandardizeEnvWrapper(gym.make('Pendulum-v1')), chunk_len = 2, trace_steps = True)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(torch.zeros(1, 2, 1))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len == 2
+    assert trace.next_observations.shape == (1, 2, 3)
+    assert trace.actions.shape == (1, 2, 1)
+    assert trace.rewards.shape == (1, 2)
+
+def test_action_chunk_trace_standardize_wrapper_arg():
+    env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2, chunk_trace = True)
+    env.reset(seed = 0)
+
+    obs, reward, terminated, truncated, info = env.step(torch.randint(0, 2, (1, 2)))
+    trace = info['chunk_trace']
+
+    assert trace.executed_len in (1, 2)
+    assert trace.next_observations.shape[0] == 1
+    assert len(trace.infos) == trace.executed_len
+
+def test_action_chunk_trace_disabled_by_default():
+    env = ActionChunkWrapper(InfoStepEnv(), chunk_len = 2)
+    env.reset()
+
+    _, _, _, _, info = env.step(np.zeros((1, 2), dtype = int))
+
+    assert 'chunk_trace' not in info
+
 def test_action_chunk_all_export():
     import env_ssl_wrapper
     assert hasattr(env_ssl_wrapper, 'ActionChunkWrapper')
+    assert hasattr(env_ssl_wrapper, 'ChunkTrace')

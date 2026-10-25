@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = '0.6.2'
+__version__ = '0.6.3'
 
 import sys as _sys
 
@@ -8,7 +8,8 @@ from . import standardize as _standardize
 from .standardize import *  # noqa: F403
 
 from .memory_trace import MemoryTraceWrapper
-from .action_chunk import ActionChunkWrapper
+from .action_chunk import ActionChunkWrapper, ChunkTrace
+from .action_chunking import ActionChunks, make_action_chunks
 from .normalize import StateNormalizationWrapper, RunningMeanStd, combine_accumulators
 from .context import TimeWrapper, PastActionsWrapper, PastStatesWrapper, fourier_time
 from .sgs import (

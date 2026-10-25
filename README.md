@@ -173,6 +173,13 @@ env = StandardizeEnvWrapper(gym.make('CartPole-v1'), normalize_state = dict(upda
 
 ### Action Chunk
 
+`chunk_len` is the single switch: omit it (or pass `None`) for ordinary per-step control, pass an integer to turn on open-loop chunking. Add `chunk_trace = True` only when the learner needs per-env-step supervision as well.
+
+```python
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2)                 # chunking on
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2, chunk_trace = True)  # + trace
+```
+
 Open-loop action chunking: one `step` executes a whole chunk of actions and returns only the final state, temporally compressing the environment by the chunk length.
 
 ```python
@@ -206,10 +213,86 @@ Pass `gamma` (default `1.`) to discount intra-chunk rewards $r = \sum_{i=0}^{L-1
 
 Set `reward_mode = 'chunk'` to get the raw per-step rewards back as a reward chunk of shape `(num_envs, chunk_length)` (`(chunk_length,)` for a single env) instead of a reduced scalar — useful when a learner wants to do per-step credit assignment within the chunk. The chunk is truncated to the number of substeps actually executed (`info['chunk_length']`) and is undiscounted, so `gamma` only affects the aggregated modes.
 
+#### Per-env-step trace
+
+Some methods — survival / goal-reaching critics in particular — need the action to be a chunk while the time labels stay on the individual env-step clock. Pass `trace_steps = True` to keep the chunk-level `step` API and additionally expose the executed substeps:
+
+```python
+env = ActionChunkWrapper(env, chunk_len = 2, trace_steps = True)
+
+obs, reward, terminated, truncated, info = env.step(chunk)
+trace = info['chunk_trace']
+
+# trace.next_observations -> (L, *obs_shape)        single env
+#                            (num_envs, L, *obs)    batched
+# trace.actions            -> (L, *action_shape)    actions actually executed
+# trace.action_mask        -> (L,) / (N, L)         True for real actions, False for padding
+# trace.rewards            -> (L,)                  per-env-step rewards
+# trace.terminated         -> (L,)
+# trace.truncated          -> (L,)
+# trace.dones              -> (L,)
+# trace.infos              -> tuple of L raw info dicts
+# trace.chunk_len          -> requested chunk length
+# trace.executed_len       -> L, number of real env steps
+# trace.is_full            -> executed_len == chunk_len
+```
+
+`next_observations` are `s_{t+1} ... s_{t+L}`. Prepend the decision-time `obs` to get the full state sequence `s_t ... s_{t+L}` used for per-step goal labels:
+
+```python
+# single env
+states = [obs, *trace.next_observations]
+
+# batched
+states = torch.cat((obs[:, None], trace.next_observations), dim = 1)
+```
+
+The outer return value is unchanged: `obs` is still the final state, `reward` follows `reward_mode`, and `info['chunk_length']` / `info['discount']` describe the full macro-step. With `trace_steps = False` (the default) the wrapper is exactly the temporal-compression wrapper described above, and no trace is built.
+
+On an early-stop substep, `next_observations` is whatever the inner env returned for that step. If the inner env autoresets, that is the reset observation; use `trace.terminated` / `trace.truncated` and `trace.infos[-1]['final_observation']` when you need the true terminal state.
+
+Conceptually this is a sliding window over the per-step action stream: at decision `t`, the critic’s action is `a[t : t + chunk_len]`. The windows are non-overlapping (stride `chunk_len`) if the policy is re-queried every chunk, and overlapping if it is re-queried every env step. The window does not cross an episode boundary; `executed_len < chunk_len` marks a shortened terminal window.
+
+#### Critic-side chunk windows
+
+`make_action_chunks` is the complementary utility for the learner: given a per-env-step action stream `(..., time, action_dim)`, it returns the action chunk seen at every step, with padding and validity masks.
+
+```python
+from env_ssl_wrapper import make_action_chunks
+
+chunks = make_action_chunks(actions, chunk_len = 2, lens = episode_lengths)
+
+chunks.actions      # (..., time, chunk_len * action_dim)
+chunks.action_mask  # (..., time, chunk_len) - False for right padding
+chunks.valid        # (..., time) - True only when the whole chunk fits
+chunks.time         # number of env steps
+```
+
+Pass `flatten = False` to keep the shape `(..., time, chunk_len, action_dim)`. `lens` may be a scalar or a tensor broadcastable to the leading batch dimensions. This is the sliding window used by the critic; it is independent of whether the actor is currently executing a chunk. `ActionChunks` is the returned named tuple.
+
+#### Boundary chunks and padding
+
+For a **future** action chunk, the first decision of an episode is fine as long as the episode has at least `chunk_len` steps. The missing-window case is the **last** `chunk_len - 1` decisions, where the chunk would cross the episode or observation-window boundary. ChronoSRL’s `valid` mask keeps only examples whose whole action chunk fits; partial terminal chunks are not trained as if they were full chunks:
+
+```python
+full_chunk = trace.is_full and (t + trace.chunk_len <= window_end)
+```
+
+If the model needs a fixed-size action tensor, right-pad the executed actions and carry the mask:
+
+```python
+padded_actions, action_mask = trace.padded_actions()  # zeros after executed_len
+```
+
+The mask must be passed into the critic — otherwise a padded zero is indistinguishable from a real zero action — and padded slots must never enter the time, hazard, separation, or occupancy losses. For a **past-action** window the same logic applies but pad on the **left**; the mask, not the fill value, defines validity.
+
+If an episode is shorter than `chunk_len`, no full future chunk exists. Either drop that episode’s examples or use a shorter chunk length for it; do not train on a zero-padded chunk as if it were real.
+
 Can also be passed directly to `StandardizeEnvWrapper` or `compose_env`:
 
 ```python
 env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2, chunk_gamma = 0.99)
+env = StandardizeEnvWrapper(gym.make('CartPole-v1'), chunk_len = 2, chunk_trace = True)
 ```
 
 Run the chunked PPO benchmark on CartPole, or check chunked rollouts against a per-step reference:

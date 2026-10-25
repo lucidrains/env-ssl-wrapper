@@ -27,6 +27,7 @@ class StandardizeEnvWrapper(EnvWrapper):
         chunk_len: int | None = None,
         chunk_gamma: float = 1.,
         chunk_reward_mode: str = 'sum',
+        chunk_trace: bool = False,
         reset_configs = None,
         sgs_kwargs: dict | None = None,
     ):
@@ -56,7 +57,7 @@ class StandardizeEnvWrapper(EnvWrapper):
             wrappers.append(('memory_trace', dict(lambdas = lambdas, keys = keys)))
 
         if exists(chunk_len):
-            wrappers.append(('action_chunk', dict(chunk_len = chunk_len, gamma = chunk_gamma, reward_mode = chunk_reward_mode)))
+            wrappers.append(('action_chunk', dict(chunk_len = chunk_len, gamma = chunk_gamma, reward_mode = chunk_reward_mode, trace_steps = chunk_trace)))
 
         if flatten_obs:
             wrappers.append('flatten_obs')

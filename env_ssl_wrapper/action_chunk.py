@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import torch
-from einops import reduce
+from einops import rearrange, reduce
 from torch import is_tensor
+from torch.utils._pytree import tree_map
+from torch_einops_utils.shape import size
 
 from .standardize.helpers import (
     EnvWrapper,
@@ -23,11 +28,66 @@ from .standardize.helpers import (
 
 # helpers
 
+def stack_axis(steps, axis):
+    return torch.stack(steps, dim = axis) if is_tensor(steps[0]) else np.stack(steps, axis = axis)
+
 def stack_steps(steps):
-    return torch.stack(steps, dim = -1) if is_tensor(steps[0]) else np.stack(steps, axis = -1)
+    return stack_axis(steps, -1)
+
+def stack_trees(items, axis = -1):
+    # stack corresponding leaves across per-step pytrees - obs may be a dict / tuple
+    return tree_map(lambda *leaves: stack_axis(list(leaves), axis), *items)
+
+def copy_tree(x):
+    return tree_map(copy_leaf, x)
 
 def chunk_steps(actions):
-    return actions.unbind(dim = 1) if is_tensor(actions) else np.moveaxis(actions, 1, 0)
+    return rearrange(actions, 'b t ... -> t b ...')
+
+# per-env-step trace of one chunk
+# next_observations are s_{t+1} .. s_{t+L}; prepend the decision obs to get s_t .. s_{t+L}
+
+@dataclass(frozen = True)
+class ChunkTrace:
+    next_observations: Any   # (..., L, *obs_shape)
+    actions: Any             # (..., L, *action_shape) - only executed actions
+    action_mask: Any         # (..., L) - True for executed actions, False for padding
+    rewards: Any             # (..., L)
+    terminated: Any          # (..., L)
+    truncated: Any           # (..., L)
+    dones: Any               # (..., L)
+    infos: tuple             # length L, one raw info dict per env step
+    chunk_len: int           # requested chunk length
+    executed_len: int        # number of real env steps
+
+    def __len__(self):
+        return self.executed_len
+
+    @property
+    def is_full(self):
+        # a full chunk is required for ChronoSRL's chunked critic training
+        return self.executed_len == self.chunk_len
+
+    def padded_actions(self, fill = 0.):
+        # right-pad the executed actions to chunk_len; the mask says which slots are real
+        actions, mask = self.actions, self.action_mask
+        is_batched = mask.ndim == 2
+
+        if is_tensor(actions):
+            shape = (actions.shape[0], self.chunk_len, *actions.shape[2:]) if is_batched else (self.chunk_len, *actions.shape[1:])
+            padded = actions.new_full(shape, fill)
+        elif isinstance(actions, np.ndarray):
+            shape = (actions.shape[0], self.chunk_len, *actions.shape[2:]) if is_batched else (self.chunk_len, *actions.shape[1:])
+            padded = np.full(shape, fill, dtype = actions.dtype)
+        else:
+            raise TypeError(f'padded_actions expects an array or tensor, got {type(actions).__name__}')
+
+        if is_batched:
+            padded[:, :self.executed_len] = actions
+        else:
+            padded[:self.executed_len] = actions
+
+        return padded, mask
 
 # wrapper
 
@@ -38,6 +98,9 @@ class ActionChunkWrapper(EnvWrapper):
 
     action chunks are shaped (num_envs, chunk_len, *action_shape), with the
     num_envs axis optional for single envs (AsyncVectorEnv workers drop it)
+
+    trace_steps = True keeps the chunk-level step API but adds info['chunk_trace']
+    with the per-env-step observations, actions, rewards, and done flags
     """
 
     priority = 100
@@ -48,7 +111,8 @@ class ActionChunkWrapper(EnvWrapper):
         chunk_len: int,
         gamma: float = 1.,
         discount: float | None = None,
-        reward_mode: str = 'sum'
+        reward_mode: str = 'sum',
+        trace_steps: bool = False
     ):
         super().__init__(env)
 
@@ -60,6 +124,7 @@ class ActionChunkWrapper(EnvWrapper):
         self.chunk_len = chunk_len
         self.gamma = float(gamma)
         self.reward_mode = reward_mode
+        self.trace_steps = trace_steps
 
         # vectorized gym envs expose a batched action space - the single env space defines the chunk layout
 
@@ -88,10 +153,10 @@ class ActionChunkWrapper(EnvWrapper):
         leading = actions.shape[:num_leading]
 
         if chunk_len == 1 and num_leading < 2:
-            actions = actions.reshape(-1, 1, *action_shape)
+            actions = rearrange(actions, '... -> 1 1 ...') if num_leading == 0 else rearrange(actions, 'b ... -> b 1 ...')
         elif num_leading == 1 and not self.expects_batch:
             assert leading[0] == chunk_len, f'expected chunk length {chunk_len}, got {leading[0]}'
-            actions = actions[None]
+            actions = rearrange(actions, '... -> 1 ...')
         else:
             assert num_leading == 2 and leading[1] == chunk_len, (
                 f'action chunks must be shaped (num_envs, chunk_len, *action_shape) or (chunk_len, *action_shape), got {tuple(actions.shape)}'
@@ -118,14 +183,33 @@ class ActionChunkWrapper(EnvWrapper):
         actions = self._normalize_chunk(actions)
 
         rewards = []
+        trace = self.trace_steps
+
+        if trace:
+            trace_obs, trace_actions, trace_rewards = [], [], []
+            trace_terminated, trace_truncated, trace_dones = [], [], []
+            trace_infos = []
+
         out = None
+        num_steps = 0
 
         for action in chunk_steps(actions):
             if not self.expects_batch:
-                action = action[0]
+                action = rearrange(action, '1 ... -> ...')
 
             out = normalize_step_out(self.env.step(action))
-            rewards.append(copy_leaf(out[1]))
+            step_reward = copy_leaf(out[1])
+            rewards.append(step_reward)
+            num_steps += 1
+
+            if trace:
+                trace_obs.append(copy_tree(out[0]))
+                trace_actions.append(copy_tree(action))
+                trace_rewards.append(step_reward)
+                trace_terminated.append(copy_leaf(out[2]))
+                trace_truncated.append(copy_leaf(out[3]))
+                trace_dones.append(copy_tree(dones_of(out[2], out[3])))
+                trace_infos.append(copy_tree(out[4]))
 
             if any_true(dones_of(out[2], out[3])):
                 break
@@ -133,7 +217,7 @@ class ActionChunkWrapper(EnvWrapper):
         obs, _, terminated, truncated, info = out
 
         rewards = stack_steps(rewards)
-        executed_len = rewards.shape[-1]
+        executed_len = num_steps
 
         if self.reward_mode == 'chunk':
             reward = rewards
@@ -157,5 +241,32 @@ class ActionChunkWrapper(EnvWrapper):
         info['chunk_length'] = executed_len
         info['chunk_rewards'] = rewards
         info['discount'] = self.gamma ** executed_len
+
+        if trace:
+            # obs / actions get an explicit time axis: (L, ...) for single envs,
+            # (num_envs, L, ...) for batched envs; scalar signals keep time last
+            time_axis = 1 if self.expects_batch else 0
+
+            num_envs = size(actions, 'b ... -> b') if is_tensor(actions) else actions.shape[0]
+            mask_shape = (num_envs, self.chunk_len) if self.expects_batch else (self.chunk_len,)
+            action_mask = actions.new_zeros(mask_shape, dtype = torch.bool) if is_tensor(actions) else np.zeros(mask_shape, dtype = bool)
+
+            if self.expects_batch:
+                action_mask[:, :executed_len] = True
+            else:
+                action_mask[:executed_len] = True
+
+            info['chunk_trace'] = ChunkTrace(
+                next_observations = stack_trees(trace_obs, axis = time_axis),
+                actions = stack_trees(trace_actions, axis = time_axis),
+                action_mask = action_mask,
+                rewards = stack_trees(trace_rewards),
+                terminated = stack_trees(trace_terminated),
+                truncated = stack_trees(trace_truncated),
+                dones = stack_trees(trace_dones),
+                infos = tuple(trace_infos),
+                chunk_len = self.chunk_len,
+                executed_len = executed_len
+            )
 
         return obs, reward, terminated, truncated, info
