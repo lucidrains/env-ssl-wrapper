@@ -129,6 +129,17 @@ def state_from_com(agent, block_com, th):
     # pre-quirk reset state: the env sets body origin, then rotates about the local CoG (0, 45)
     return np.array([agent[0], agent[1], block_com[0], block_com[1] - 45., th], dtype = np.float32)
 
+def block_pose(du, dv, dth):
+    # block offset (du, dv) in the goal frame -> (com, heading)
+    c, s = np.cos(GOAL_TH), np.sin(GOAL_TH)
+    t_com = np.clip(GOAL_COM + np.array([du * c - dv * s, du * s + dv * c]), [100., 145.], [400., 445.])
+    return t_com, float(GOAL_TH + dth)
+
+def dock_stages(w):
+    # first .55 isolates a one-tap-from-dock skill, the rest bridges into the full ladder
+    w = float(np.clip(w, 0., 1.))
+    return min(1., w / .55), max(0., (w - .55) / .45)
+
 def curriculum_config(alpha):
     # interpolate from the easy anchor (alpha=0) to a freshly sampled native state (alpha=1)
     a = float(np.clip(alpha, 0., 1.))
@@ -156,7 +167,6 @@ def curriculum_config(alpha):
 def tier_runway_config(w):
     # Tier 1: Inside-the-push-cone runway & steering funnel (stochastic callable, zero train/eval overlap)
     w = float(np.clip(w, 0., 1.))
-    c4, s4 = np.cos(GOAL_TH), np.sin(GOAL_TH)
 
     def fn(rng, idx = 0, step = 0):
         d = float(rng.uniform(4. + 45. * w, 12. + 125. * w))
@@ -164,8 +174,7 @@ def tier_runway_config(w):
         du_spread = 1.5 + 38. * w
         du = float(np.clip(0.45 * d * np.sin(dth) + rng.uniform(-du_spread, du_spread), -0.75 * d, 0.75 * d))
         dv = -d * float(np.cos(0.4 * dth))
-        t_com = np.clip(GOAL_COM + np.array([du * c4 - dv * s4, du * s4 + dv * c4]), [100., 145.], [400., 445.])
-        th = float(GOAL_TH + dth)
+        t_com, th = block_pose(du, dv, dth)
         c, s = np.cos(th), np.sin(th)
         pb = np.array([t_com[0] + 45. * s, t_com[1] - 45. * c])
         u_a = float(np.clip(-2500. * dth / max(d, 10.) + rng.uniform(-(4. + 60. * w), 4. + 60. * w), -75., 75.))
@@ -175,18 +184,77 @@ def tier_runway_config(w):
 
     return fn
 
+def tier_dock_circumnav_config(w):
+    # skill 1: agent spawn angle sweeps rear -> front around a fixed block
+    w_skill, w_bridge = dock_stages(w)
+
+    def fn(rng, idx = 0, step = 0):
+        d = float(rng.uniform(3.2 + 38. * w_bridge, 6. + 95. * w_bridge))
+        dth = float(rng.uniform(-(0.02 + 0.65 * w_bridge), 0.02 + 0.65 * w_bridge))
+        du = float(rng.uniform(-(1.5 + 45. * w_bridge), 1.5 + 45. * w_bridge))
+        dv = -d
+        t_com, th = block_pose(du, dv, dth)
+        phi_max = float(np.pi * (0.08 + 0.92 * w_skill))
+        side = 1. if int(idx) % 2 == 0 else -1.
+        phi_a = side * float(rng.uniform(.5 * phi_max, phi_max))
+        r_a = float(rng.uniform(66. + 10. * w_bridge, 72. + 24. * w_skill + 65. * w_bridge))
+        c, s = np.cos(th), np.sin(th)
+        loc_u, loc_v = r_a * np.sin(phi_a), -r_a * np.cos(phi_a)
+        agent = np.clip(np.array([t_com[0] + c * loc_u - s * loc_v, t_com[1] + s * loc_u + c * loc_v]), 50., 450.)
+        return state_from_com(agent, t_com, th)
+
+    return fn
+
+def tier_dock_rotation_config(w):
+    # skill 2: rotational offset sweeps 0 -> .65 rad around a fixed block
+    w_skill, w_bridge = dock_stages(w)
+
+    def fn(rng, idx = 0, step = 0):
+        d = float(rng.uniform(4. + 4. * w_skill + 40. * w_bridge, 7.5 + 6. * w_skill + 95. * w_bridge))
+        side = 1. if int(idx) % 2 == 0 else -1.
+        dth = side * float(rng.uniform(0.03 + 0.35 * w_skill, 0.06 + 0.55 * w_skill))
+        spread = 1.5 + 25. * w_bridge
+        du = float(0.4 * d * np.sin(dth) + rng.uniform(-spread, spread))
+        dv = -d * float(np.cos(0.4 * dth))
+        t_com, th = block_pose(du, dv, dth)
+        c, s = np.cos(th), np.sin(th)
+        pb = np.array([t_com[0] + 45. * s, t_com[1] - 45. * c])
+        u_a = float(np.clip(-16. * side * (0.3 + 0.7 * w_skill) + rng.uniform(-spread, spread), -55., 55.))
+        v_a = -float(rng.uniform(21., 24. + 14. * w_skill + 55. * w_bridge))
+        agent = np.clip(np.array([pb[0] + c * u_a - s * v_a, pb[1] + s * u_a + c * v_a]), 50., 450.)
+        return state_from_com(agent, t_com, th)
+
+    return fn
+
+def tier_dock_reach_config(w):
+    # skill 3: agent standoff sweeps near -> far around a fixed block
+    w_skill, w_bridge = dock_stages(w)
+
+    def fn(rng, idx = 0, step = 0):
+        d = float(rng.uniform(3.2 + 40. * w_bridge, 6. + 100. * w_bridge))
+        dth = float(rng.uniform(-(0.02 + 0.55 * w_bridge), 0.02 + 0.55 * w_bridge))
+        du = float(rng.uniform(-(1.5 + 35. * w_bridge), 1.5 + 35. * w_bridge))
+        dv = -d
+        t_com, th = block_pose(du, dv, dth)
+        c, s = np.cos(th), np.sin(th)
+        pb = np.array([t_com[0] + 45. * s, t_com[1] - 45. * c])
+        u_a = float(rng.uniform(-(6. + 85. * w_skill), 6. + 85. * w_skill))
+        v_a = -float(rng.uniform(21. + 55. * w_skill, 26. + 145. * w_skill))
+        agent = np.clip(np.array([pb[0] + c * u_a - s * v_a, pb[1] + s * u_a + c * v_a]), 50., 450.)
+        return state_from_com(agent, t_com, th)
+
+    return fn
+
 def tier_circumnav_config(w):
     # Tier 2: Smooth progression from rear push (w=0) to omnidirectional agent spawn & circumnavigation (w=1)
     w = float(np.clip(w, 0., 1.))
-    c4, s4 = np.cos(GOAL_TH), np.sin(GOAL_TH)
 
     def fn(rng, idx = 0, step = 0):
         d = float(rng.uniform(4. + 45. * w, 10. + 120. * w))
         dth = float(rng.uniform(-(0.02 + 0.85 * w), 0.02 + 0.85 * w))
         du = float(rng.uniform(-0.65 * d * (0.1 + 0.9 * w), 0.65 * d * (0.1 + 0.9 * w)))
         dv = -d
-        t_com = np.clip(GOAL_COM + np.array([du * c4 - dv * s4, du * s4 + dv * c4]), [100., 145.], [400., 445.])
-        th = float(GOAL_TH + dth)
+        t_com, th = block_pose(du, dv, dth)
         phi_max = float(np.pi * (0.05 + 0.95 * w))
         phi_a = float(rng.uniform(-phi_max, phi_max))
         r_a = float(rng.uniform(66. + 12. * min(w * 3., 1.), 70. + 95. * w))

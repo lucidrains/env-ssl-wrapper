@@ -779,3 +779,22 @@ def test_sgs_realistic_easy_medium_hard(bank, state_dim):
     assert probs.shape == (3,)
     assert torch.isclose(probs.sum(), torch.tensor(1.), atol = 1e-6)
     assert int(probs.argmax()) == 1
+
+def test_frontier_ignores_unvisited_and_isolated_rungs():
+    frontier = lambda p, counts: ladder_frontier_index(p, counts, threshold = .25, min_count = 2, kernel = 5, fallback = 0)
+
+    # rungs 0..4 visited, rungs 5..19 untouched
+    p, counts = torch.full((20,), float('nan')), torch.zeros(20, dtype = torch.long)
+    p[:5], counts[:5] = torch.tensor([.7, .5, .4, .35, .35]), torch.tensor([6, 6, 4, 3, 2])
+
+    # unvisited neighbors must not dilute rung 4 into a fake failure
+    assert frontier(p, counts) == 4
+
+    # a lone lucky rung far ahead must not teleport the frontier
+    p[15], counts[15] = 1., 2
+    assert frontier(p, counts) == 4
+
+    # nor when it is the only visited rung in the bank
+    lone, lone_counts = torch.full((20,), float('nan')), torch.zeros(20, dtype = torch.long)
+    lone[15], lone_counts[15] = 1., 2
+    assert frontier(lone, lone_counts) == 0

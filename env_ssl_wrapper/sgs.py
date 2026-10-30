@@ -220,8 +220,20 @@ def _scores(p, counts):
     assert counts is None or counts.numel() == p.numel(), f'counts length {counts.numel()} must match p length {p.numel()}'
     return p, counts
 
-def _smooth(x, kernel):
-    return F.avg_pool1d(x.reshape(1, 1, -1), kernel, 1, kernel // 2).reshape(-1) if x.numel() >= kernel else x
+def _window_sum(x, kernel):
+    # avg_pool gives the window mean - scale back to a sum
+    return F.avg_pool1d(x.reshape(1, 1, -1), kernel, 1, kernel // 2).reshape(-1) * kernel
+
+def _smooth(x, kernel, weights = None):
+    # kernel mean over levels - confidence weights drop unvisited levels out
+    if kernel <= 1 or x.numel() < kernel:
+        return x
+
+    if not exists(weights):
+        return _window_sum(x, kernel) / kernel
+
+    num, den = _window_sum(x * weights, kernel), _window_sum(weights, kernel)
+    return torch.where(den > 0., num / den, torch.zeros_like(num))
 
 def _frontier(p, counts, positions, *, threshold = .25, min_count = 2, kernel = 5, fallback = 0., mask = None):
     assert 0. <= threshold <= 1., f'threshold must be within [0, 1], got {threshold}'
@@ -243,9 +255,27 @@ def _frontier(p, counts, positions, *, threshold = .25, min_count = 2, kernel = 
 
     assert torch.isfinite(positions).all(), 'positions must be finite'
 
-    p = torch.where(counts >= min_count, p.nan_to_num(0.), torch.zeros_like(p)) if exists(counts) else p.nan_to_num(0.)
+    p_clean = p.nan_to_num(0.)
     levels = positions.unique(sorted = True)
-    rates = _smooth(torch.stack([p[positions == level].mean() for level in levels]), kernel)
+    index = torch.searchsorted(levels, positions)
+
+    def group_sum(x):
+        return torch.zeros_like(levels).index_add_(0, index, x)
+
+    if exists(counts) and min_count > 0:
+        c = counts.to(p.dtype).clamp(min = 0.)
+        level_c = group_sum(c)
+        level_p = group_sum(p_clean * c) / level_c.clamp(min = 1e-12)
+
+        # confidence weight - unvisited levels drop out, a lone rung cannot move the frontier
+        weights = (level_c / min_count).clamp(max = 1.)
+        support = _window_sum(weights, kernel)
+        eligible = (level_c >= min_count) & (support >= min(1.5, kernel))
+        rates = torch.where(eligible, _smooth(level_p, kernel, weights), torch.zeros_like(level_p))
+    else:
+        level_p = group_sum(p_clean) / group_sum(torch.ones_like(p_clean))
+        rates = _smooth(level_p, kernel)
+
     hit = (rates >= threshold).nonzero().flatten()
 
     return float(levels[hit[-1]]) if hit.numel() else float(fallback)
