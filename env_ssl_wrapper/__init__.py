@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = '0.6.4'
+__version__ = '0.6.5'
 
 import sys as _sys
 
@@ -28,7 +28,15 @@ from .sgs import (
     difficulty_score_fn,
     build_difficulty_bank,
 )
-from .evaluate import evaluate_actor, EpisodeStats
+from .evaluate import (
+    evaluate_actor,
+    record_actor_video,
+    record_video,
+    EpisodeStats,
+    capture_frame,
+    save_video,
+    save_video_frames,
+)
 
 # backwards compatibility — the standardize wrappers used to live at the top
 # level, so keep the old module paths (e.g. `env_ssl_wrapper.mocks`) importable
