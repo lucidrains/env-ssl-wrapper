@@ -14,6 +14,7 @@ from env_ssl_wrapper import (
     compose_env,
     difficulty_frontier,
     difficulty_score_fn,
+    group_ladder_score_fn,
     ladder_frontier_index,
     ladder_score_fn,
     reset_env_at,
@@ -82,6 +83,109 @@ def test_ladder_score_fn_retains_and_probes_around_the_frontier():
     assert torch.all(weights[:k_star + 1] >= 0.35 - 1e-6)
     assert weights[k_star + 5] > weights[k_star + 15]
     assert torch.all(weights >= 0.)
+
+def test_rare_probe_and_tail_across_frontier_scores():
+    # wall at rung 3, then a lone rare success at rung 15
+    p = torch.tensor([1., 1., 1., .5, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., .1])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+    tail = torch.zeros_like(p, dtype = torch.bool)
+    tail[15:] = True
+
+    k_star = ladder_frontier_index(p, counts)
+    kwargs = dict(probe_offset = 5., probe_width = 2., envelope_span = 15., envelope_width = 2.)
+    base = ladder_score_fn(p, counts, **kwargs)
+    rare = ladder_score_fn(p, counts, **kwargs, rare_gain = .75, rare_width = 2., rare_gap = 5., rare_min_count = 5, rare_min_p = .05)
+    floored = ladder_score_fn(p, counts, **kwargs, tail_mask = tail, tail_gain = .1)
+
+    # the rare probe beats the standard probe, the tail boost is constant
+    assert k_star < 15
+    assert rare[15] > base[15] and rare[15] > rare[k_star + 5]
+    assert torch.allclose(floored[tail] - base[tail], torch.full_like(base[tail], .1))
+    assert torch.allclose(floored[~tail], base[~tail])
+    assert torch.allclose(base, ladder_score_fn(p, counts, **kwargs, rare_gain = 0., tail_gain = 0.))
+
+    # the probe needs a real, well visited success at least `rare_gap` past the wall
+
+    def bump(pp, cc, **over):
+        opts = {**kwargs, 'rare_width': 2., 'rare_min_p': .05, **over}
+        return ladder_score_fn(pp, cc, rare_gain = .75, **opts) - ladder_score_fn(pp, cc, rare_gain = 0., **opts)
+
+    low_count, no_success = counts.clone(), p.clone()
+    low_count[15], no_success[15] = 1, 0.
+
+    assert bump(p, counts, rare_gap = 5.)[15] > 0.
+    for weights in (
+        bump(p, low_count, rare_gap = 5., rare_min_count = 5),
+        bump(no_success, counts, rare_gap = 5.),
+        bump(no_success, counts, rare_gap = 5., rare_min_p = 0.),
+        bump(p, counts, rare_gap = 20.),
+        bump(p, counts, rare_gap = 5., rare_min_p = .2),
+    ):
+        assert torch.isclose(weights[15], torch.tensor(0.))
+
+    # the same options work against an explicit difficulty
+
+    difficulty = torch.tensor([0., .25, .5, .75, 1.])
+    p = torch.tensor([1., 1., .5, 0., .1])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+    kwargs = dict(probe_offset = .05, probe_width = .05, envelope_span = .1, envelope_width = .05)
+    frontier_mask = difficulty < 1.
+
+    base = difficulty_score_fn(p, counts, difficulty = difficulty, frontier_mask = frontier_mask, **kwargs)
+    rare = difficulty_score_fn(
+        p, counts, difficulty = difficulty, frontier_mask = frontier_mask, **kwargs,
+        rare_gain = .75, rare_width = .05, rare_gap = .4, rare_min_p = .05
+    )
+
+    assert rare[4] > base[4]
+
+def test_group_ladder_score_fn_scores_each_group():
+    p = torch.tensor([1., 1., 0., 0., 0., 1., 1., 1., .5, 0.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+    groups = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+    kwargs = dict(probe_offset = 2., probe_width = 1., envelope_span = 4., envelope_width = 2.)
+
+    weights = group_ladder_score_fn(p, counts, group_ids = groups, **kwargs)
+    per_group = torch.cat([ladder_score_fn(p[groups == group], counts[groups == group], **kwargs) for group in groups.unique()])
+
+    assert torch.allclose(weights, per_group)
+    # one global ladder cannot give both groups their own probe
+    assert not torch.allclose(weights, ladder_score_fn(p, counts, **kwargs))
+
+    normed = group_ladder_score_fn(p, counts, group_ids = groups, normalize_groups = True, **kwargs)
+    weighted = group_ladder_score_fn(p, counts, group_ids = groups, group_weights = {0: 2., 1: 1.}, **kwargs)
+
+    for group, size in ((0, 5), (1, 5)):
+        mask = groups == group
+        assert torch.allclose(normed[mask], per_group[mask] / size)
+        assert torch.allclose(weighted[mask], per_group[mask] * (2. if group == 0 else 1.))
+
+    assert group_ladder_score_fn(torch.empty(0), group_ids = torch.empty(0)).numel() == 0
+
+def test_rare_probe_tail_and_group_validation():
+    p = torch.tensor([1., 0.])
+    counts = torch.full_like(p, 10, dtype = torch.long)
+
+    for kwargs, match in (
+        (dict(rare_gain = -1.), 'rare_gain'),
+        (dict(rare_gain = 1., rare_width = 0.), 'rare_width'),
+        (dict(rare_gain = 1., rare_gap = -1.), 'rare_gap'),
+        (dict(rare_gain = 1., rare_min_count = -1), 'rare_min_count'),
+        (dict(rare_gain = 1., rare_min_p = 1.1), 'rare_min_p'),
+        (dict(tail_gain = -.1), 'tail_gain'),
+        (dict(tail_gain = .1), 'tail_mask'),
+        (dict(tail_mask = torch.tensor([True]), tail_gain = .1), 'tail_mask length'),
+    ):
+        with pytest.raises(AssertionError, match = match):
+            ladder_score_fn(p, counts, **kwargs)
+
+    for kwargs, match in (
+        (dict(group_ids = torch.tensor([0])), 'group_ids length'),
+        (dict(group_ids = torch.tensor([0, 1]), tail_mask = torch.tensor([True])), 'tail_mask length'),
+        (dict(group_ids = torch.tensor([0, 1]), group_weights = [1.]), 'group_weights length'),
+    ):
+        with pytest.raises(AssertionError, match = match):
+            group_ladder_score_fn(p, counts, **kwargs)
 
 def test_difficulty_score_fn_collapses_replicas_and_smooths_by_difficulty():
     # six replicas at each of four difficulty levels; the frontier is the level

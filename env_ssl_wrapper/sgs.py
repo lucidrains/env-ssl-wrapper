@@ -294,6 +294,23 @@ def difficulty_frontier(p, counts, difficulty, *, threshold = .25, min_count = 2
     """Largest difficulty whose aggregated success rate clears `threshold`."""
     return _frontier(p, counts, difficulty, threshold = threshold, min_count = min_count, kernel = kernel, fallback = fallback, mask = frontier_mask)
 
+def _gaussian(x, center, width):
+    return torch.exp(-.5 * ((x - center) / width) ** 2)
+
+def _rare_probe(positions, p, counts, star, *, gain, width, gap, min_count, min_p):
+    # bump the nearest observed success at least `gap` past the frontier
+
+    p_clean = p.nan_to_num(0.)
+    eligible = (positions >= star + gap) & (p_clean > 0.) & (p_clean >= min_p)
+
+    if exists(counts) and min_count > 0:
+        eligible = eligible & (counts >= min_count)
+
+    if not eligible.any():
+        return 0.
+
+    return gain * _gaussian(positions, positions[eligible].min(), width)
+
 def _frontier_score(
     p, counts, positions,
     *,
@@ -304,9 +321,16 @@ def _frontier_score(
     probe_offset = .03,
     probe_width = .04,
     probe_gain = .65,
+    rare_gain = 0.,
+    rare_width = None,
+    rare_gap = 0.,
+    rare_min_count = 2,
+    rare_min_p = 0.,
     retain_weight = .35,
     envelope_span = .09,
     envelope_width = .04,
+    tail_mask = None,
+    tail_gain = 0.,
     threshold = .25,
     min_count = 2,
     kernel = 5,
@@ -316,21 +340,55 @@ def _frontier_score(
     assert probe_width > 0. and envelope_width > 0., 'probe_width and envelope_width must be positive'
     assert probe_offset >= 0. and envelope_span >= 0., 'probe_offset and envelope_span must be non-negative'
     assert probe_gain >= 0. and retain_weight >= 0., 'probe_gain and retain_weight must be non-negative'
+    assert rare_gain >= 0., 'rare_gain must be non-negative'
+    assert rare_width is None or rare_width > 0., 'rare_width must be positive'
+    assert rare_gap >= 0., 'rare_gap must be non-negative'
+    assert rare_min_count >= 0, 'rare_min_count must be non-negative'
+    assert 0. <= rare_min_p <= 1., 'rare_min_p must be within [0, 1]'
+    assert tail_gain >= 0., 'tail_gain must be non-negative'
+    assert tail_gain == 0. or exists(tail_mask), 'tail_mask is required when tail_gain > 0'
 
     p, counts = _scores(p, counts)
     positions = torch.as_tensor(positions, dtype = p.dtype, device = p.device).reshape(-1)
     star = _frontier(p, counts, positions, threshold = threshold, min_count = min_count, kernel = kernel, fallback = fallback, mask = mask)
 
     base = sgs_score_fn(p, counts, target = target, kappa = kappa, eps = eps, unvisited_weight = unvisited_weight)
-    probe = probe_gain * torch.exp(-.5 * ((positions - (star + probe_offset)) / probe_width) ** 2)
+    probe = probe_gain * _gaussian(positions, star + probe_offset, probe_width)
     retain = torch.where(positions <= star, torch.full_like(positions, retain_weight), torch.zeros_like(positions))
     envelope = torch.where(positions <= star + envelope_span, torch.ones_like(positions),
                            torch.exp(-(positions - (star + envelope_span)) / envelope_width))
 
-    return torch.maximum(torch.maximum(base * envelope, probe), retain)
+    weights = torch.maximum(torch.maximum(base * envelope, probe), retain)
+
+    # rare-success probe - spend mass on a rung that has actually succeeded past the wall
+
+    if rare_gain > 0.:
+        weights = weights + _rare_probe(
+            positions, p, counts, star,
+            gain = rare_gain,
+            width = default(rare_width, probe_width),
+            gap = rare_gap,
+            min_count = rare_min_count,
+            min_p = rare_min_p,
+        )
+
+    # tail boost - constant mass on a designated tail (e.g. the native configs), independent of the frontier
+
+    if tail_gain > 0.:
+        tail = torch.as_tensor(tail_mask, dtype = torch.bool, device = weights.device).reshape(-1)
+        assert tail.numel() == weights.numel(), 'tail_mask length must match positions'
+        weights = weights + tail.to(weights.dtype) * tail_gain
+
+    return weights
 
 def ladder_score_fn(p, counts = None, *, probe_offset = 5., probe_width = 6., envelope_span = 15., envelope_width = 6., fallback = 4, **kwargs):
-    """Frontier score over an index-ordered bank."""
+    """Frontier score over an index-ordered bank.
+
+    `rare_gain` > 0 adds a second probe on the nearest rung past the frontier
+    that has actually succeeded (`rare_min_p`, `rare_min_count`), at least
+    `rare_gap` away. `tail_mask` / `tail_gain` add a constant boost to the
+    native tail.
+    """
     p = torch.as_tensor(p).reshape(-1)
     if p.numel() == 0:
         return p.float()
@@ -344,8 +402,61 @@ def ladder_score_fn(p, counts = None, *, probe_offset = 5., probe_width = 6., en
         fallback = fallback, **kwargs,
     )
 
+def group_ladder_score_fn(
+    p, counts = None, *,
+    group_ids,
+    group_weights = None,
+    normalize_groups = False,
+    tail_mask = None,
+    **kwargs
+):
+    """Per-group frontier score over a concatenated bank.
+
+    Each group gets its own frontier and probe, so families interleaved on one
+    difficulty axis cannot move a probe to another group's wall. `group_weights`
+    scales a group's mass (a dict keyed by group id, or a sequence in sorted
+    group order); `normalize_groups` splits a group's mass evenly across members.
+    Remaining keywords are handed to `ladder_score_fn`.
+    """
+
+    p = torch.as_tensor(p).reshape(-1)
+    if p.numel() == 0:
+        return p.float()
+
+    ids = torch.as_tensor(group_ids, device = p.device).reshape(-1)
+    counts = None if not exists(counts) else torch.as_tensor(counts, device = p.device).reshape(-1)
+    tail_mask = None if not exists(tail_mask) else torch.as_tensor(tail_mask, dtype = torch.bool, device = p.device).reshape(-1)
+
+    assert ids.numel() == p.numel(), 'group_ids length must match p'
+    assert counts is None or counts.numel() == p.numel(), 'counts length must match p'
+    assert tail_mask is None or tail_mask.numel() == p.numel(), 'tail_mask length must match p'
+
+    groups = ids.unique(sorted = True)
+
+    if exists(group_weights) and not isinstance(group_weights, dict):
+        group_weights = torch.as_tensor(group_weights).reshape(-1)
+        assert group_weights.numel() == groups.numel(), 'group_weights length must match the number of groups'
+        group_weights = dict(zip(groups.tolist(), group_weights.tolist()))
+
+    group_weights = group_weights or {}
+    weights = torch.zeros_like(p, dtype = torch.float32)
+
+    for group in groups.tolist():
+        mask = ids == group
+        scale = float(group_weights.get(group, 1.)) / (int(mask.sum()) if normalize_groups else 1)
+        weights[mask] = scale * ladder_score_fn(
+            p[mask], counts[mask] if exists(counts) else None,
+            tail_mask = tail_mask[mask] if exists(tail_mask) else None,
+            **kwargs,
+        )
+
+    return weights
+
 def difficulty_score_fn(p, counts = None, *, difficulty, normalize_groups = True, frontier_mask = None, **kwargs):
-    """Frontier score over a bank with an explicit difficulty per config."""
+    """Frontier score over a bank with an explicit difficulty per config.
+
+    Takes the same probe, rare-success and tail options as `ladder_score_fn`.
+    """
     p = torch.as_tensor(p).reshape(-1)
     if p.numel() == 0:
         return p.float()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = '0.6.5'
+__version__ = '0.6.7'
 
 import sys as _sys
 
@@ -25,6 +25,7 @@ from .sgs import (
     ladder_frontier_index,
     difficulty_frontier,
     ladder_score_fn,
+    group_ladder_score_fn,
     difficulty_score_fn,
     build_difficulty_bank,
 )

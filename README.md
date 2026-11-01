@@ -431,6 +431,16 @@ env = SGSWrapper(
 )
 ```
 
+When a bank concatenates several families on one difficulty axis, `group_ladder_score_fn` gives every family its own frontier and probe:
+
+```python
+from env_ssl_wrapper import group_ladder_score_fn
+
+score_fn = partial(group_ladder_score_fn, group_ids = family_ids)
+```
+
+`group_weights` scales a family's mass — a dict keyed by group id, or a sequence in sorted group order — and `normalize_groups` splits it evenly across members. On a sparse ladder, `ladder_score_fn` / `difficulty_score_fn` can also put a probe on the nearest observed success past the frontier (`rare_gain`, `rare_width`, `rare_gap`, `rare_min_p`, `rare_min_count`) and add a constant boost to the native tail (`tail_mask`, `tail_gain`).
+
 For a non-autoresetting worker — e.g. a simulator inside `AsyncVectorEnv` with `autoreset_mode='Disabled'` — pass `autoresets = True` to `SGSWrapper`, so it resets the worker itself and the next episode starts from the sampled config.
 
 The score equation is swappable: the default beta shaped kernel around `frontier_success_rate` (paper: `target`; `sgs_score_fn`) is simply one rule of the bank's state. Whatever you pass as `score_fn` is handed, by name, the arguments it declares — `p` (per state success rates), `counts`, `history` (the raw episode outcomes), `step`, `window`, and the hparams `target`, `kappa`, `eps`, `unvisited_weight` (the `target` / `kappa` names are the paper aliases for `frontier_success_rate` / `kernel_sharpness`).

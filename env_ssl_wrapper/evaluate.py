@@ -456,7 +456,7 @@ def evaluate_actor(
             if collect_trace:
                 ep_states.append(to_numpy(actor_obs))
                 ep_actions.append(to_numpy(unscaled_action))
-                ep_rewards.append(float(reward[0].item()))
+                ep_rewards.append(float(reward.reshape(-1)[0].item()))
                 if exists(current_goal):
                     ep_goals.append(to_numpy(current_goal[0]))
                 ep_infos.append(info)
