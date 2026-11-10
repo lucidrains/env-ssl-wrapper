@@ -75,8 +75,8 @@ class TimeLimitWrapper(EnvWrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
 
-        terminated_np = to_numpy(terminated)
-        truncated_np = to_numpy(truncated)
+        terminated_np = to_numpy(terminated).astype(bool)
+        truncated_np = to_numpy(truncated).astype(bool)
 
         self.t += 1
 

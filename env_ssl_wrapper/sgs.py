@@ -222,6 +222,8 @@ def _scores(p, counts):
 
 def _window_sum(x, kernel):
     # avg_pool gives the window mean - scale back to a sum
+    if kernel <= 1:
+        return x
     return F.avg_pool1d(x.reshape(1, 1, -1), kernel, 1, kernel // 2).reshape(-1) * kernel
 
 def _smooth(x, kernel, weights = None):
@@ -230,7 +232,7 @@ def _smooth(x, kernel, weights = None):
         return x
 
     if not exists(weights):
-        return _window_sum(x, kernel) / kernel
+        return F.avg_pool1d(x.reshape(1, 1, -1), kernel, 1, kernel // 2, count_include_pad = False).reshape(-1)
 
     num, den = _window_sum(x * weights, kernel), _window_sum(weights, kernel)
     return torch.where(den > 0., num / den, torch.zeros_like(num))
@@ -258,6 +260,7 @@ def _frontier(p, counts, positions, *, threshold = .25, min_count = 2, kernel = 
     p_clean = p.nan_to_num(0.)
     levels = positions.unique(sorted = True)
     index = torch.searchsorted(levels, positions)
+    eff_kernel = kernel if levels.numel() >= kernel else 1
 
     def group_sum(x):
         return torch.zeros_like(levels).index_add_(0, index, x)
@@ -269,12 +272,12 @@ def _frontier(p, counts, positions, *, threshold = .25, min_count = 2, kernel = 
 
         # confidence weight - unvisited levels drop out, a lone rung cannot move the frontier
         weights = (level_c / min_count).clamp(max = 1.)
-        support = _window_sum(weights, kernel)
-        eligible = (level_c >= min_count) & (support >= min(1.5, kernel))
-        rates = torch.where(eligible, _smooth(level_p, kernel, weights), torch.zeros_like(level_p))
+        support = _window_sum(weights, eff_kernel)
+        eligible = (level_c >= min_count) & (support >= min(1.5, eff_kernel))
+        rates = torch.where(eligible, _smooth(level_p, eff_kernel, weights), torch.zeros_like(level_p))
     else:
         level_p = group_sum(p_clean) / group_sum(torch.ones_like(p_clean))
-        rates = _smooth(level_p, kernel)
+        rates = _smooth(level_p, eff_kernel)
 
     hit = (rates >= threshold).nonzero().flatten()
 
@@ -996,6 +999,14 @@ class SGSWrapper(EnvWrapper):
     @property
     def trace(self):
         return self.sampler.trace
+
+    @property
+    def group_rates(self):
+        return self.sampler.group_rates
+
+    @property
+    def group_probs(self):
+        return self.sampler.group_probs
 
     def _ids(self):
         return self.current_config_ids.copy() if self.is_vector else int(self.current_config_ids[0])

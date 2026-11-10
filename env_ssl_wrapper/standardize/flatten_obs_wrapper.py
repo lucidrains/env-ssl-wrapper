@@ -8,9 +8,11 @@ from torch.utils._pytree import tree_flatten
 from .helpers import (
     TransformObservationWrapper,
     default,
+    exists,
     is_array,
     is_scalar,
     is_vectorized,
+    maybe_transform_final_observation,
 )
 
 # helpers
@@ -53,10 +55,11 @@ class FlattenObsWrapper(TransformObservationWrapper):
         super().__init__(env)
         self.is_vector = default(is_vector, is_vectorized(env))
 
-    def transform_obs(self, obs):
+    def transform_obs(self, obs, is_vector: bool | None = None):
         if is_array(obs):
             return obs
 
+        is_vec = default(is_vector, self.is_vector)
         leaves, _ = tree_flatten(obs)
         leaves = [t for t in leaves if flattenable(t)]
 
@@ -64,7 +67,19 @@ class FlattenObsWrapper(TransformObservationWrapper):
             return obs
 
         if len(leaves) == 1:
-            return flatten_leaf(leaves[0], is_vector = self.is_vector)
+            return flatten_leaf(leaves[0], is_vector = is_vec)
 
-        return concat_leaves(leaves, is_vector = self.is_vector)
+        return concat_leaves(leaves, is_vector = is_vec)
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        obs = self.transform_obs(obs, is_vector = False)
+        maybe_transform_final_observation(info, lambda final_obs: self.transform_obs(final_obs, is_vector = False))
+        return obs, info

@@ -299,3 +299,31 @@ def test_hierarchy_two_e2e_with_callable_leaves():
     states2, ids2 = sampler.sample(batch_size = 64)
     assert len(states2) == 64
     assert ids2.min() >= 0 and ids2.max() < 4
+
+def test_sgs_wrapper_exposes_group_rates_and_group_probs():
+    from env_ssl_wrapper import SGSWrapper, StandardizeEnvWrapper
+
+    class SimpleGoalEnv:
+        def reset(self, *, seed = None, options = None):
+            state = options['reset_to_state'] if isinstance(options, dict) and 'reset_to_state' in options else np.zeros(1, dtype = np.float32)
+            self.state = np.asarray(state, dtype = np.float32)
+            return self.state.copy(), {}
+
+        def step(self, action):
+            ok = bool(self.state[0] < 1.5)
+            return self.state.copy(), float(ok), True, False, {'is_success': ok}
+
+    configs = [
+        dict(name = 'easy', configs = leaf_configs(2)),
+        dict(name = 'hard', configs = [np.array([2.], dtype = np.float32), np.array([3.], dtype = np.float32)]),
+    ]
+    env = SGSWrapper(StandardizeEnvWrapper(SimpleGoalEnv()), reset_configs = configs, default_prob = 0., seed = 0)
+
+    for _ in range(12):
+        env.reset()
+        env.step(torch.zeros(1, 1))
+
+    assert set(env.group_rates.keys()) == {'easy', 'hard', 'root'}
+    assert set(env.group_probs.keys()) == {'easy', 'hard', 'root'}
+    assert env.group_probs['easy'] + env.group_probs['hard'] == pytest.approx(1.)
+    assert env.group_probs['root'] == pytest.approx(1.)

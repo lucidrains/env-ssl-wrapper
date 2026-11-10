@@ -137,3 +137,62 @@ def test_seed_env_prefers_an_explicit_seed_method():
     assert seed_env(env, 11)
     assert env.seeded == 11
     assert not seed_env(env, None)
+
+def test_wrapped_slot_reset_flattens_dict_obs():
+    from env_ssl_wrapper.sgs import write_slot_obs
+
+    class SeededDictObsEnv:
+        metadata = {}
+        render_mode = None
+        spec = None
+
+        @property
+        def observation_space(self):
+            return gymnasium.spaces.Dict({
+                'a': gymnasium.spaces.Box(-np.inf, np.inf, shape = (3,), dtype = np.float32),
+                'b': gymnasium.spaces.Box(-np.inf, np.inf, shape = (2,), dtype = np.float32),
+            })
+
+        @property
+        def action_space(self):
+            return gymnasium.spaces.Box(-1., 1., shape = (2,), dtype = np.float32)
+
+        def reset(self, seed = None, options = None):
+            val = float(seed or 0)
+            return {'a': np.full(3, val, dtype = np.float32), 'b': np.full(2, val + 1., dtype = np.float32)}, {}
+
+        def step(self, action):
+            return self.reset()[0], 1.0, False, False, {}
+
+        def close(self):
+            pass
+
+    vec = gymnasium.vector.SyncVectorEnv([SeededDictObsEnv, SeededDictObsEnv])
+    env = compose_env(vec, 'flatten_obs', ('tensor', dict(device = 'cpu')))
+
+    try:
+        obs, _ = reset_env(env, seed = 1)
+        assert obs.shape == (2, 5)
+
+        out = reset_env_at(env, 1, seed = 10)
+        assert out is not None
+        slot_obs, _ = out
+        assert slot_obs.shape == (5,)
+        assert torch.allclose(slot_obs, torch.tensor([10., 10., 10., 11., 11.]))
+
+        merged = write_slot_obs(obs, slot_obs, 1)
+        assert torch.allclose(merged[0], torch.tensor([1., 1., 1., 2., 2.]))
+        assert torch.allclose(merged[1], torch.tensor([10., 10., 10., 11., 11.]))
+    finally:
+        env.close()
+
+def test_legacy_seeding_module_and_dunder_all():
+    import env_ssl_wrapper
+    import env_ssl_wrapper.seeding as legacy_seeding
+
+    assert legacy_seeding.reset_env is reset_env
+    assert legacy_seeding.reset_env_at is reset_env_at
+    assert legacy_seeding.seed_env is seed_env
+    assert 'ActionChunks' in env_ssl_wrapper.__all__
+    assert 'make_action_chunks' in env_ssl_wrapper.__all__
+    assert 'SGSWrapper' in env_ssl_wrapper.__all__

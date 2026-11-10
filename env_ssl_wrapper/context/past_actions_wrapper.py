@@ -3,23 +3,17 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
-from torch import is_tensor
 
 from ..standardize.helpers import (
-    TransformObservationWrapper,
     default,
-    dones_of,
-    env_num_envs,
     exists,
     first_existing,
     get_adapter,
     get_attr,
-    is_vectorized,
     maybe_transform_final_observation,
-    normalize_step_out,
 )
 from ..standardize.spaces import action_space_is_discrete
-from .helpers import attach_obs, done_mask, obs_device, parse_history_lags, select_history_lags
+from .helpers import HistoryWrapper
 
 # helpers
 
@@ -39,7 +33,7 @@ def infer_zero_action(env, num_envs, vectorized):
 
 # wrapper
 
-class PastActionsWrapper(TransformObservationWrapper):
+class PastActionsWrapper(HistoryWrapper):
     """
     Supplies the actions that led into the current observation, oldest first in a trailing
     history axis. The most recent action is at `[..., -1]`; with the default
@@ -60,8 +54,6 @@ class PastActionsWrapper(TransformObservationWrapper):
     a longer history.
     """
 
-    priority = 80
-
     def __init__(
         self,
         env,
@@ -71,145 +63,47 @@ class PastActionsWrapper(TransformObservationWrapper):
         has_past_actions_key: str | None = None,
         num_past_actions: int | Sequence[int] = 1,
     ):
-        super().__init__(env)
         assert first_action in ('zeros', None), "first_action must be 'zeros' or None"
 
-        lags, history_len = parse_history_lags(num_past_actions, 'num_past_actions')
+        super().__init__(
+            env,
+            key = key,
+            first_fill = first_action,
+            obs_key = obs_key,
+            has_mask_key = has_past_actions_key,
+            num_past = num_past_actions,
+            param_name = 'num_past_actions',
+        )
 
-        self.key = key
         self.first_action = first_action
-        self.obs_key = obs_key
         self.has_past_actions_key = has_past_actions_key
-        self.lags = lags
-        self.num_past_actions = len(lags) if exists(lags) else history_len
-        self.history_len = history_len
+        self.num_past_actions = self.num_past
 
-        self.num_envs = env_num_envs(env)
-        self.vectorized = is_vectorized(env)
         self.zero_action = infer_zero_action(env, self.num_envs, self.vectorized) if exists(first_action) else None
-        self.zero_history = self._fit_history(self._batch_action(self.zero_action))
-
-        self.history = None
-        self.history_mask = None
-
-    # batched so the state is (num_envs, history_len, *action_shape)
-
-    def _batch_action(self, action):
-        if not exists(action):
-            return None
-
-        action = action if is_tensor(action) else torch.as_tensor(action)
-
-        if not self.vectorized:
-            return action.reshape(1, *action.shape)
-
-        return action.unsqueeze(0) if action.ndim == 0 else action
-
-    def _fit_history(self, action):
-        if not exists(action):
-            return None
-
-        padding = action.unsqueeze(1).expand(-1, self.history_len, *action.shape[1:]).clone()
-        return padding
-
-    def _format_history(self, history = None, mask = None):
-        # internal batch first -> the single-env shapes this wrapper has always emitted
-
-        history, mask = select_history_lags(history, mask, self.lags, self.history_len)
-
-        if self.num_past_actions == 1:
-            if exists(history):
-                history = history[:, 0] if self.vectorized else history[0, 0]
-            if exists(mask):
-                mask = mask[:, 0]
-        elif exists(history) and not self.vectorized:
-            history = history[0]
-
-        return history, mask
-
-    def _append(self, action):
-        # shift the window and append the action that just ran -> history, mask
-
-        if not exists(action):
-            if not exists(self.history):
-                return None, None
-
-            action = torch.zeros_like(self.history[:, -1])
-            present = torch.zeros(self.num_envs, dtype = torch.bool)
-        else:
-            present = torch.ones(self.num_envs, dtype = torch.bool)
-
-        if exists(self.history):
-            action = action.reshape(self.num_envs, *self.history.shape[2:])
-            history = torch.cat((self.history[:, 1:], action[:, None]), dim = 1)
-            mask = torch.cat((self.history_mask[:, 1:], present[:, None]), dim = 1)
-            return history, mask
-
-        padding = action.new_zeros((self.num_envs, self.history_len, *action.shape[1:]))
-        history = torch.cat((padding[:, 1:], action[:, None]), dim = 1)
-
-        mask = torch.zeros(self.num_envs, self.history_len, dtype = torch.bool)
-        mask[:, -1] = present
-        return history, mask
-
-    def _attach(self, obs, value, mask):
-        device = obs_device(obs)
-
-        if exists(value) and is_tensor(value) and exists(device):
-            value = value.to(device)
-
-        if exists(mask) and is_tensor(mask) and exists(device):
-            mask = mask.to(device)
-
-        obs = attach_obs(obs, self.key, value, self.obs_key)
-
-        if not exists(self.has_past_actions_key):
-            return obs
-
-        return attach_obs(obs, self.has_past_actions_key, mask, self.obs_key)
+        self.zero_history = self._zero_history_like(self._batch_item(self.zero_action))
 
     def reset(self, **kwargs):
         self.history = self.zero_history.clone() if exists(self.zero_history) else None
         self.history_mask = torch.zeros(self.num_envs, self.history_len, dtype = torch.bool)
         return super().reset(**kwargs)
 
-    def transform_obs(self, obs, done = None):
-        return self._attach(obs, *self._format_history(self.history, self.history_mask))
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from ..standardize.seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        self._reset_slot(index)
+        value, mask = self._format_slot_history(index)
+
+        obs = self._attach(obs, value, mask)
+        maybe_transform_final_observation(info, lambda final_obs: self._attach(final_obs, value, mask))
+        return obs, info
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
-        done = dones_of(terminated, truncated)
-        fresh = done_mask(done, self.num_envs) & self.autoresets
-
-        next_history, next_mask = self._append(self._batch_action(action))
-
-        # terminal observations keep the history through the action that just ran
-
-        maybe_transform_final_observation(
-            info,
-            lambda final_obs: self._attach(final_obs, *self._format_history(next_history, next_mask))
-        )
-
-        # live observations: fresh autoreset slots start a new episode
-
-        live_history, live_mask = next_history, next_mask
-
-        if self.autoresets and fresh.any():
-            padding = self.zero_history if exists(self.zero_history) else (torch.zeros_like(next_history) if exists(next_history) else None)
-
-            if exists(padding) and exists(next_history):
-                padding = padding.to(device = next_history.device, dtype = next_history.dtype)
-                fresh_ = fresh.reshape(-1, *((1,) * (padding.ndim - 1))).to(padding.device)
-                live_history = torch.where(fresh_, padding, next_history)
-                live_mask = next_mask.clone()
-                live_mask[fresh.cpu()] = False
-
-            # a fresh slot with `first_action = None` has no past actions at all
-
-            if not exists(self.first_action) and bool(fresh.all()):
-                live_history = None
-
-        self.history, self.history_mask = live_history, live_mask
-
-        out = self._attach(obs, *self._format_history(live_history, live_mask))
+        obs, reward, terminated, truncated, info = self._step_with_item(action, self._batch_item(action))
+        out = self._attach(obs, *self._format_history(self.history, self.history_mask))
         return out, reward, terminated, truncated, info

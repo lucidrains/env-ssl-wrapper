@@ -31,6 +31,9 @@ def calc_lerp_weight(lam, done, x):
     else:
         done = done.to(device = x.device, dtype = torch.bool)
 
+    if done.ndim > 1:
+        done = done.any(dim = tuple(range(1, done.ndim)))
+
     weight = torch.where(done, 1., 1. - lam).to(x)
 
     if x.ndim <= weight.ndim:
@@ -67,14 +70,15 @@ class MemoryTraceWrapper(TransformObservationWrapper):
         prefix = self.trace_key if key == self.obs_key else f'{key}_{self.trace_key}'
         return f'{prefix}_{lam}' if len(self.lambdas) > 1 else prefix
 
-    def transform_obs(self, obs, done = None, update_state: bool = True):
+    def _to_obs_dict(self, obs):
         if isinstance(obs, (tuple, list)):
-            out = {f'{self.obs_key}_{i}': elem for i, elem in enumerate(obs)}
-        elif isinstance(obs, dict):
-            out = dict(obs)
-        else:
-            out = {self.obs_key: obs}
+            return {f'{self.obs_key}_{i}': elem for i, elem in enumerate(obs)}
+        if isinstance(obs, dict):
+            return dict(obs)
+        return {self.obs_key: obs}
 
+    def transform_obs(self, obs, done = None, update_state: bool = True):
+        out = self._to_obs_dict(obs)
         target_keys = tuple(k for k in default(self.keys, tuple(out.keys())) if k in out)
 
         for key in target_keys:
@@ -98,7 +102,10 @@ class MemoryTraceWrapper(TransformObservationWrapper):
             if key not in self.traces:
                 traces = [val_float.clone() for _ in self.lambdas]
             else:
-                traces = [prev.lerp(val_float, calc_lerp_weight(lam, done, val_float)) for lam, prev in zip(self.lambdas, self.traces[key])]
+                traces = [
+                    prev.to(device = val_float.device, dtype = val_float.dtype).lerp(val_float, calc_lerp_weight(lam, done, val_float))
+                    for lam, prev in zip(self.lambdas, self.traces[key])
+                ]
 
             if update_state:
                 self.traces[key] = traces
@@ -108,9 +115,53 @@ class MemoryTraceWrapper(TransformObservationWrapper):
 
         return out
 
+    def _reset_slot_obs(self, obs, index: int, update_state: bool = True):
+        out = self._to_obs_dict(obs)
+        target_keys = tuple(k for k in default(self.keys, tuple(out.keys())) if k in out)
+
+        for key in target_keys:
+            val = out.get(key)
+
+            if not exists(val) or not (is_array_like(val) or is_scalar(val)):
+                continue
+
+            if not is_tensor(val):
+                try:
+                    val = torch.as_tensor(val)
+                except (TypeError, ValueError):
+                    continue
+                out[key] = val
+
+            val_float = val.float() if not val.is_floating_point() else val
+
+            if update_state and key in self.traces:
+                for prev in self.traces[key]:
+                    if prev.ndim > val_float.ndim:
+                        prev[index] = val_float.to(device = prev.device, dtype = prev.dtype)
+                    else:
+                        prev.copy_(val_float.to(device = prev.device, dtype = prev.dtype))
+
+            for lam in self.lambdas:
+                out[self.trace_key_for(key, lam)] = val_float.clone()
+
+        return out
+
     def reset(self, **kwargs):
         self.traces = dict()
         return super().reset(**kwargs)
+
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .standardize.seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        obs = self._reset_slot_obs(obs, index, update_state = True)
+        maybe_transform_final_observation(info, partial(self._reset_slot_obs, index = index, update_state = False))
+        return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))

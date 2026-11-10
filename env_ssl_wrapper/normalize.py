@@ -95,6 +95,12 @@ def dist_device():
 # welford's parallel (chan) moment merging - updates are order independent, so a rollout can be
 # folded in as one batch, in chunks, or from another accumulator
 
+def resolve_stats_dtype(dtype, device):
+    if exists(device) and torch.device(device).type == 'mps' and dtype == torch.float64:
+        return torch.float32
+
+    return dtype
+
 class RunningMeanStd:
     def __init__(
         self,
@@ -107,6 +113,8 @@ class RunningMeanStd:
     ):
         if isinstance(shape, int):
             shape = (shape,)
+
+        dtype = resolve_stats_dtype(dtype, device)
 
         self.shape = tuple(shape)
         self.eps = eps
@@ -214,6 +222,17 @@ class RunningMeanStd:
         other = RunningMeanStd(shape = self.shape, eps = self.eps, prior_count = self.prior_count, clip = self.clip, dtype = self.dtype, device = self.device)
         return other.load_state_dict(self.state_dict())
 
+    def to(self, device = None, dtype = None):
+        if exists(device):
+            self.device = device
+        if exists(dtype):
+            self.dtype = dtype
+
+        self.dtype = resolve_stats_dtype(self.dtype, self.device)
+        self.mean = self.mean.to(device = self.device, dtype = self.dtype)
+        self.var = self.var.to(device = self.device, dtype = self.dtype)
+        return self
+
     # distributed
 
     def real_moments(self):
@@ -242,23 +261,23 @@ class RunningMeanStd:
         world, numel = dist.get_world_size(group), self.mean.numel()
 
         n_real, mean, m2 = self.real_moments()
-        packed = torch.cat((torch.tensor([n_real]), mean.reshape(-1), m2.reshape(-1))).to(device = dist_device(), dtype = torch.float64)
+        packed = torch.cat((mean.new_tensor([n_real]), mean.reshape(-1), m2.reshape(-1))).to(device = dist_device()).to(dtype = torch.float64)
 
         gathered = [torch.empty_like(packed) for _ in range(world)]
         dist.all_gather(gathered, packed, group = group)
 
         moments = [(row[0].item(), row[1:1 + numel], row[1 + numel:]) for row in gathered]
-        combined = combine_moments(moments, shape = self.shape, prior_count = self.prior_count, eps = self.eps, dtype = self.dtype, device = self.device)
+        combined = combine_moments(moments, shape = self.shape, prior_count = self.prior_count, eps = self.eps, clip = self.clip, dtype = self.dtype, device = self.device)
 
         self.count, self.mean, self.var = combined.count, combined.mean, combined.var
         return self
 
-def combine_moments(moments, shape = (), prior_count = 0., eps = 1e-8, dtype = torch.float64, device = None):
+def combine_moments(moments, shape = (), prior_count = 0., eps = 1e-8, clip = None, dtype = torch.float64, device = None):
     # the statistics of the union of the samples the moments were taken over - input pseudo counts
     # stripped, real sample moments merged, one pseudo count added back at the end, so the result
     # is what a single process seeing every rank's samples would have
 
-    out = RunningMeanStd(shape = shape, eps = eps, prior_count = prior_count, dtype = dtype, device = device)
+    out = RunningMeanStd(shape = shape, eps = eps, prior_count = prior_count, clip = clip, dtype = dtype, device = device)
 
     for count, mean, m2 in moments:
         count = float(count)
@@ -268,12 +287,16 @@ def combine_moments(moments, shape = (), prior_count = 0., eps = 1e-8, dtype = t
 
     return out
 
-def combine_accumulators(accumulators, prior_count = 0., eps = 1e-8, dtype = torch.float64, device = None):
+def combine_accumulators(accumulators, prior_count = 0., eps = 1e-8, clip = None, dtype = torch.float64, device = None):
+    assert len(accumulators) > 0, 'accumulators must be non-empty'
+    first = accumulators[0]
+
     return combine_moments(
         [accumulator.real_moments() for accumulator in accumulators],
-        shape = accumulators[0].shape,
+        shape = first.shape,
         prior_count = prior_count,
         eps = eps,
+        clip = default(clip, first.clip),
         dtype = dtype,
         device = device
     )
@@ -359,15 +382,19 @@ class StateNormalizationWrapper(TransformObservationWrapper):
                 dtype = self.stats_dtype,
                 device = self.stats_device
             )
+
+        stat_shape = self.stats[key].shape
+
+        if key not in self.pending:
             self.pending[key] = RunningMeanStd(
-                shape = shape,
+                shape = stat_shape,
                 eps = self.eps,
                 dtype = self.stats_dtype,
                 device = self.stats_device
             )
 
         if exists(shape):
-            assert tuple(self.stats[key].shape) == tuple(shape), f'key {key!r} was first seen with shape {self.stats[key].shape} and now arrives as {shape}'
+            assert tuple(stat_shape) == tuple(shape), f'key {key!r} was first seen with shape {stat_shape} and now arrives as {shape}'
 
         return self.stats[key]
 
@@ -403,9 +430,9 @@ class StateNormalizationWrapper(TransformObservationWrapper):
 
         return is_float_leaf(value) and (is_array_like(value) or is_scalar(value))
 
-    def _sample_shape(self, value):
+    def _sample_shape(self, value, is_batched = None):
         shape = tuple(getattr(value, 'shape', ()))
-        return shape[1:] if self.is_batched else shape
+        return shape[1:] if default(is_batched, self.is_batched) else shape
 
     def _leaves(self, obs):
         # the target leaves of an obs, keyed for the statistics
@@ -432,11 +459,11 @@ class StateNormalizationWrapper(TransformObservationWrapper):
 
         return fn(self.obs_key, obs) if self._is_target(self.obs_key, obs) else obs
 
-    def _transform(self, obs):
+    def _transform(self, obs, is_batched = None):
         # -> normalized obs, and the raw leaves it was made from
 
         def normalize_leaf(key, value):
-            return self.ensure_stats(key, self._sample_shape(value)).normalize(value)
+            return self.ensure_stats(key, self._sample_shape(value, is_batched = is_batched)).normalize(value)
 
         return self._map_leaves(obs, normalize_leaf), self._leaves(obs)
 
@@ -462,19 +489,19 @@ class StateNormalizationWrapper(TransformObservationWrapper):
 
         return default(get_batch_size(raw), 1) if self.is_batched else 1
 
-    def _fold(self, raw, mask = None):
+    def _fold(self, raw, mask = None, is_batched = None):
         if self.update_mode == 'frozen' or not len(raw):
             return
 
+        batched = default(is_batched, self.is_batched)
         targets = self.stats if self.update_mode == 'live' else self.pending
 
         for key, leaf in raw.items():
-            if key not in targets:
-                self.ensure_stats(key, self._sample_shape(leaf))
+            self.ensure_stats(key, self._sample_shape(leaf, is_batched = batched))
 
             rows = to_tensor(leaf)
 
-            if not self.is_batched:
+            if not batched:
                 rows = rearrange(rows, '... -> 1 ...')
 
             if exists(mask):
@@ -504,6 +531,25 @@ class StateNormalizationWrapper(TransformObservationWrapper):
         self._prev_done = None
         return obs, info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .standardize.seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        obs, raw = self._transform(obs, is_batched = False)
+
+        self._fold(raw, is_batched = False)
+        maybe_transform_final_observation(info, lambda final_obs: self._transform(final_obs, is_batched = False)[0])
+
+        if exists(self._prev_done) and index < len(self._prev_done):
+            self._prev_done[index] = False
+
+        return obs, info
+
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         done = dones_of(terminated, truncated)
@@ -522,7 +568,7 @@ class StateNormalizationWrapper(TransformObservationWrapper):
             done_mask = to_bool_array(done, batch)
             prev_done = self._prev_done if exists(self._prev_done) and len(self._prev_done) == batch else np.zeros(batch, dtype = bool)
 
-            newly_done = done_mask & ~prev_done
+            newly_done = done_mask if self.autoresets else (done_mask & ~prev_done)
             self._prev_done = done_mask
 
             # states of slots that do not end on this step, then the terminal states of the ones that do
@@ -609,18 +655,22 @@ class StateNormalizationWrapper(TransformObservationWrapper):
 
         for group in ('stats', 'pending'):
             target = getattr(self, group)
+            is_stats = group == 'stats'
 
             for key, stats_state in state.get(group, dict()).items():
                 if key not in target:
                     target[key] = RunningMeanStd(
                         shape = tuple(stats_state['shape']),
                         eps = self.eps,
-                        prior_count = self.prior_count,
-                        clip = self.clip,
+                        prior_count = self.prior_count if is_stats else 0.,
+                        clip = self.clip if is_stats else None,
                         dtype = self.stats_dtype,
                         device = self.stats_device
                     )
 
                 target[key].load_state_dict(stats_state)
+
+        for key in self.stats:
+            self.ensure_stats(key)
 
         return self

@@ -902,3 +902,20 @@ def test_frontier_ignores_unvisited_and_isolated_rungs():
     lone, lone_counts = torch.full((20,), float('nan')), torch.zeros(20, dtype = torch.long)
     lone[15], lone_counts[15] = 1., 2
     assert frontier(lone, lone_counts) == 0
+
+def test_frontier_small_banks_and_unweighted_boundary_smoothing():
+    # banks shorter than kernel (e.g. 1, 2, 3 rungs with kernel = 5) and kernel = 1 must never pad-fail
+    for n in (1, 2, 3):
+        p = torch.full((n,), 0.8)
+        counts = torch.full((n,), 5, dtype = torch.long)
+        assert ladder_frontier_index(p, counts, threshold = 0.5, kernel = 5) == n - 1
+        assert ladder_frontier_index(p, None, threshold = 0.5, kernel = 5) == n - 1
+        assert ladder_frontier_index(p, counts, threshold = 0.5, kernel = 1) == n - 1
+
+    # unweighted smoothing (counts = None or min_count = 0) must not depress boundaries via zero-padding
+    p_uniform = torch.full((6,), 0.8)
+    assert ladder_frontier_index(p_uniform, None, threshold = 0.75, kernel = 5) == 5
+    assert ladder_frontier_index(p_uniform, torch.ones(6, dtype = torch.long), threshold = 0.75, min_count = 0, kernel = 5) == 5
+
+    diffs = torch.linspace(0., 1., 3)
+    assert difficulty_frontier(torch.tensor([0.9, 0.9, 0.1]), torch.tensor([5, 5, 5]), diffs, threshold = 0.5, kernel = 5) == pytest.approx(float(diffs[1]))

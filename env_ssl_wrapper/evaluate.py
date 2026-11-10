@@ -10,6 +10,7 @@ from torch.distributions import Bernoulli, Categorical, Distribution
 from torch.utils._pytree import tree_map
 
 from .standardize.spaces import action_space_is_discrete
+from .standardize.seeding import _take_slot, seed_env
 from .standardize.helpers import (
     default,
     dones_of,
@@ -327,8 +328,11 @@ def resolve_goal(goal, obs, info, device, num_envs):
         tensor = tensor.float()
 
     tensor = tensor.to(device)
-    tensor = tensor[None] if tensor.ndim == 1 else tensor
-    return tensor.expand(num_envs, -1) if tensor.shape[0] == 1 and num_envs > 1 else tensor
+    if tensor.ndim == 0:
+        tensor = tensor.reshape(1, 1)
+    elif tensor.ndim == 1:
+        tensor = tensor[None]
+    return tensor.expand(num_envs, *tensor.shape[1:]) if tensor.shape[0] == 1 and num_envs > 1 else tensor
 
 def episode_succeeded(ep_data, success_threshold):
     if not exists(success_threshold):
@@ -344,13 +348,13 @@ def episode_succeeded(ep_data, success_threshold):
     return ep_data['return_'] >= float(success_threshold)
 
 def safe_reset(env, seed = None):
-    # gymnasium resets accept seed; legacy sims reset without it
+    # gymnasium resets accept seed; legacy sims fall back to seed_env + reset()
 
     if exists(seed):
         try:
             return normalize_reset_out(env.reset(seed = seed))
-        except TypeError:
-            pass
+        except (TypeError, ValueError):
+            seed_env(env, seed)
 
     return normalize_reset_out(env.reset())
 
@@ -417,7 +421,11 @@ def evaluate_actor(
 
         done_returns, done_lengths, videos, frames, video_candidates = [], [], [], [], []
         collect_trace = callable(on_episode)
-        ep_states, ep_actions, ep_rewards, ep_goals, ep_infos = [], [], [], [], []
+        ep_states = [[] for _ in range(num_envs)]
+        ep_actions = [[] for _ in range(num_envs)]
+        ep_rewards = [[] for _ in range(num_envs)]
+        ep_goals = [[] for _ in range(num_envs)]
+        ep_infos = [[] for _ in range(num_envs)]
         stop_early = False
 
         while len(done_returns) < episodes and not stop_early:
@@ -454,12 +462,17 @@ def evaluate_actor(
             active_t = torch.from_numpy(active)
 
             if collect_trace:
-                ep_states.append(to_numpy(actor_obs))
-                ep_actions.append(to_numpy(unscaled_action))
-                ep_rewards.append(float(reward.reshape(-1)[0].item()))
-                if exists(current_goal):
-                    ep_goals.append(to_numpy(current_goal[0]))
-                ep_infos.append(info)
+                obs_np = to_numpy(actor_obs)
+                act_np = to_numpy(unscaled_action)
+                rew_flat = reward.reshape(-1)
+
+                for i in np.where(active)[0]:
+                    ep_states[i].append(_take_slot(obs_np, i, num_envs) if num_envs > 1 else obs_np)
+                    ep_actions[i].append(_take_slot(act_np, i, num_envs) if num_envs > 1 else act_np)
+                    ep_rewards[i].append(float(rew_flat[i].item()))
+                    if exists(current_goal):
+                        ep_goals[i].append(to_numpy(current_goal[i]))
+                    ep_infos[i].append(_take_slot(info, i, num_envs) if num_envs > 1 else info)
 
             if isinstance(goal, str) or callable(goal):
                 next_goal = resolve_goal(goal, obs, info, device, num_envs)
@@ -507,14 +520,14 @@ def evaluate_actor(
                     length = ep_length,
                     terminated = bool(term_np[i]),
                     truncated = bool(trunc_np[i]),
-                    info = info,
-                    reset_info = reset_info,
+                    info = _take_slot(info, i, num_envs) if num_envs > 1 else info,
+                    reset_info = _take_slot(reset_info, i, num_envs) if num_envs > 1 else reset_info,
                     frames = list(frames),
-                    states = list(ep_states),
-                    actions = list(ep_actions),
-                    rewards = list(ep_rewards),
-                    goals = list(ep_goals),
-                    infos = list(ep_infos),
+                    states = list(ep_states[i]),
+                    actions = list(ep_actions[i]),
+                    rewards = list(ep_rewards[i]),
+                    goals = list(ep_goals[i]),
+                    infos = list(ep_infos[i]),
                     env = env
                 )
 
@@ -545,6 +558,9 @@ def evaluate_actor(
                 steps[i] = 0
                 active[i] = False
 
+                if collect_trace:
+                    ep_states[i], ep_actions[i], ep_rewards[i], ep_goals[i], ep_infos[i] = [], [], [], [], []
+
                 if stop_on_success and accepted_video and episode_succeeded(ep_data, success_threshold):
                     stop_early = True
                     break
@@ -552,9 +568,6 @@ def evaluate_actor(
             if (done.any() or not active.any()) and len(done_returns) < episodes and not stop_early:
                 if record:
                     frames = []
-
-                if collect_trace:
-                    ep_states, ep_actions, ep_rewards, ep_goals, ep_infos = [], [], [], [], []
 
                 # autoresetting envs reset themselves, everything else resets here
 
@@ -567,6 +580,9 @@ def evaluate_actor(
                     lengths.zero_()
                     steps.zero_()
                     active[:] = True
+                    if collect_trace:
+                        for j in range(num_envs):
+                            ep_states[j], ep_actions[j], ep_rewards[j], ep_goals[j], ep_infos[j] = [], [], [], [], []
                 elif env_autoresets(env):
                     active[newly_done] = True
 

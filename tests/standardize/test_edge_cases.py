@@ -748,3 +748,31 @@ def test_evaluate_actor_dict_action():
 
     stats = evaluate_actor(dict_actor, DictActionEnv(), episodes = 1)
     assert stats.num_episodes == 1
+
+def test_time_limit_integer_and_float_dones():
+    class NumericDoneEnv:
+        def __init__(self, dtype):
+            self.dtype = dtype
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return np.zeros((2, 2), dtype = np.float32), {}
+
+        def step(self, action):
+            self.t += 1
+            # slot 0 terminates natively at step 2; slot 1 reaches max_episode_steps = 2
+            term = np.array([1 if self.t >= 2 else 0, 0], dtype = self.dtype)
+            trunc = np.zeros(2, dtype = self.dtype)
+            return np.zeros((2, 2), dtype = np.float32), np.ones(2), term, trunc, {}
+
+    for dtype in (np.int64, np.float32):
+        env = TimeLimitWrapper(NumericDoneEnv(dtype), max_timesteps = 2)
+        env.reset()
+
+        _, _, term, trunc, _ = env.step(None)
+        assert np.array_equal(np.asarray(term, dtype = bool), [False, False])
+        assert np.array_equal(np.asarray(trunc, dtype = bool), [False, False])
+
+        _, _, term, trunc, _ = env.step(None)
+        assert np.array_equal(np.asarray(term, dtype = bool), [True, False])
+        assert np.array_equal(np.asarray(trunc, dtype = bool), [False, True])

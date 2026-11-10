@@ -634,3 +634,123 @@ def test_invalid_keys():
 
     with pytest.raises(AssertionError):
         StateNormalizationWrapper(MockEnv(), keys = ('a', 'b')).reset()
+
+def test_load_state_dict_preserves_zero_pending_prior_and_partial_state():
+    src = StateNormalizationWrapper(MockEnv(), update_mode = 'deferred')
+    src.reset()
+    src.step(None)
+    src.commit_stats()
+    assert src.count() == 3.  # 1 prior + reset + 1 step
+
+    dst = StateNormalizationWrapper(MockEnv(), update_mode = 'deferred', clip = 5.)
+    dst.load_state_dict(src.state_dict())
+
+    assert dst.pending['obs'].prior_count == 0.
+    assert dst.pending['obs'].clip is None
+
+    # committing two subsequent rollouts must add only real samples, never phantom priors
+    dst.reset()
+    dst.step(None)
+    dst.commit_stats()
+    assert dst.count() == 5.
+
+    dst.reset()
+    dst.commit_stats()
+    assert dst.count() == 6.
+
+    # partial state dict without 'pending' into a deferred wrapper still creates pending accumulators
+    partial_dst = StateNormalizationWrapper(MockEnv(), update_mode = 'deferred')
+    partial_dst.load_state_dict({'stats': src.state_dict()['stats']})
+    assert 'obs' in partial_dst.pending
+    partial_dst.reset()
+    partial_dst.commit_stats()
+    assert partial_dst.count() == 4.
+
+def test_autoreset_consecutive_single_step_terminations_counted():
+    class ConsecutiveAutoresetEnv:
+        is_vector = True
+        autoresets = True
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return torch.tensor([[0.], [0.]]), {}
+
+        def step(self, action):
+            self.t += 1
+
+            if self.t == 1:
+                info = {'final_observation': torch.tensor([[10.], [1.]]), '_final_observation': torch.tensor([True, False])}
+                return torch.tensor([[100.], [1.]]), torch.ones(2), torch.tensor([True, False]), torch.zeros(2, dtype = torch.bool), info
+
+            info = {'final_observation': torch.tensor([[20.], [2.]]), '_final_observation': torch.tensor([True, False])}
+            return torch.tensor([[200.], [2.]]), torch.ones(2), torch.tensor([True, False]), torch.zeros(2, dtype = torch.bool), info
+
+    env = StateNormalizationWrapper(ConsecutiveAutoresetEnv(), prior_count = 0.)
+    env.reset()        # +2 samples ([0], [0])
+    env.step(None)     # +1 live ([1]) + 1 terminal ([10]) = +2 (done slot's padded obs skipped)
+    env.step(None)     # +1 live ([2]) + 1 terminal ([20]) = +2 (second consecutive terminal state still folded)
+
+    # all 6 valid observations (including both consecutive terminal states on slot 0) are folded
+    assert env.count() == 6.
+    expected = torch.tensor([0., 0., 1., 10., 2., 20.], dtype = torch.float64)
+    assert torch.allclose(env.mean().double(), expected.mean().unsqueeze(0))
+
+def test_reset_at_and_sgs_composition():
+    from env_ssl_wrapper import SGSWrapper, reset_env_at
+
+    class SlotResetVecEnv:
+        num_envs = 2
+        is_vector = True
+        autoresets = True
+
+        def __init__(self):
+            self.states = torch.zeros(2, 2)
+
+        def reset(self, **kwargs):
+            self.states = torch.tensor([[1., 2.], [3., 4.]])
+            return self.states.clone(), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            val = options['reset_to_state'] if isinstance(options, dict) and 'reset_to_state' in options else [5., 6.]
+            self.states[index] = torch.as_tensor(val, dtype = torch.float32)
+            return self.states[index].clone(), {}
+
+        def step(self, action):
+            done = torch.tensor([True, False])
+            return self.states.clone(), torch.ones(2), done, torch.zeros(2, dtype = torch.bool), {'is_success': np.array([True, False])}
+
+    env = StateNormalizationWrapper(SlotResetVecEnv(), prior_count = 0.)
+    env.reset()
+    assert env.count() == 2.
+
+    slot_out = reset_env_at(env, 0)
+    assert slot_out is not None
+    slot_obs, _ = slot_out
+    assert slot_obs.shape == (2,)
+    assert env.count() == 3.
+
+    bank = np.array([[1., 2.], [5., 6.]], dtype = np.float32)
+    sgs_env = SGSWrapper(StateNormalizationWrapper(SlotResetVecEnv()), reset_configs = bank, default_prob = 0., seed = 0)
+    obs, _ = sgs_env.reset()
+    assert obs.shape == (2, 2)
+    obs, *_ = sgs_env.step(None)
+    assert obs.shape == (2, 2)
+
+def test_combine_accumulators_clip_non_empty_and_accelerator_moments():
+    with pytest.raises(AssertionError):
+        combine_accumulators([])
+
+    a = RunningMeanStd(shape = (2,), prior_count = 0., clip = 3.5).update(torch.tensor([[1., 2.], [3., 4.]]))
+    b = RunningMeanStd(shape = (2,), prior_count = 0., clip = 3.5).update(torch.tensor([[5., 6.]]))
+    merged = combine_accumulators([a, b])
+
+    assert merged.clip == 3.5
+    assert merged.count == 3.
+
+    accel = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else None)
+    if accel is not None:
+        rms = RunningMeanStd(shape = (2,)).to(accel)
+        rms.update(torch.ones(4, 2, device = accel))
+        count, mean, var = rms.real_moments()
+        packed = torch.cat([mean.new_tensor([count]), mean.reshape(-1), var.reshape(-1)])
+        assert packed.device.type == accel

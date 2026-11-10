@@ -352,3 +352,45 @@ def test_evaluate_actor_multidim_bernoulli():
 
     assert torch.allclose(stats.returns, torch.tensor([1.]))
     assert np.allclose(env.last_action, np.array([1, 0]))
+
+def test_evaluate_actor_multidim_goal_on_vector_env():
+    received = []
+
+    def image_goal_actor(obs, goal = None):
+        received.append(goal)
+        return torch.zeros(obs.shape[0], 2)
+
+    goal = torch.ones(1, 3, 4, 4)
+    evaluate_actor(image_goal_actor, CyclingStaggeredVecEnv(), episodes = 2, goal = goal)
+
+    assert received[0].shape == (2, 3, 4, 4)
+    assert torch.allclose(received[0], torch.ones(2, 3, 4, 4))
+
+def test_evaluate_actor_on_episode_vector_env_per_slot_traces():
+    traces = []
+    evaluate_actor(zero_actor, CyclingStaggeredVecEnv(), episodes = 2, on_episode = traces.append)
+
+    assert len(traces) == 2
+    # slot 0 finishes at step 2; slot 1 continues undisturbed and finishes at step 5 with all 5 steps recorded
+    assert len(traces[0]['states']) == 2 and len(traces[0]['rewards']) == 2
+    assert len(traces[1]['states']) == 5 and len(traces[1]['rewards']) == 5
+    assert sum(traces[1]['rewards']) == 5.
+
+def test_evaluate_actor_seeds_legacy_seed_method_env():
+    class LegacySeedMethodEnv:
+        def __init__(self):
+            self.seeded = []
+
+        def seed(self, s):
+            self.seeded.append(s)
+
+        def reset(self):
+            return np.zeros(2), {}
+
+        def step(self, action):
+            return np.zeros(2), 1.0, True, False, {}
+
+    env = LegacySeedMethodEnv()
+    evaluate_actor(zero_actor, env, episodes = 2, seed = 42)
+
+    assert env.seeded == [42, 43]

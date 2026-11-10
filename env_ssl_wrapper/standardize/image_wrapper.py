@@ -120,6 +120,28 @@ class ImageObservationWrapper(TransformObservationWrapper):
         obs, info = normalize_reset_out(self.env.reset(**kwargs))
         return self.observation(obs), info
 
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from .seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        img = self.render_frame()
+        if img.ndim == 4:
+            img = img[index]
+
+        obs = self.observation(obs, img = img)
+
+        if isinstance(info, dict):
+            for key in FINAL_OBSERVATION_KEYS:
+                if key in info and not (isinstance(info[key], dict) and self.image_key in info[key]):
+                    info[key] = self.observation(info[key], img = img)
+
+        return obs, info
+
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         img = self.render_frame()

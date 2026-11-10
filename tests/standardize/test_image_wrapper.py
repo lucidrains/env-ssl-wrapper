@@ -140,3 +140,28 @@ def test_scalar_image_size_expands():
     env = StandardizeEnvWrapper(DMControlMockEnv(), image_size = 16)
     obs, info = env.reset()
     assert obs['image'].shape == (1, 3, 16, 16)
+
+def test_image_wrapper_vector_reset_at():
+    from env_ssl_wrapper import reset_env_at
+    from env_ssl_wrapper.sgs import write_slot_obs
+
+    vec = gym.vector.SyncVectorEnv([
+        lambda: gym.make('CartPole-v1', render_mode = 'rgb_array'),
+        lambda: gym.make('CartPole-v1', render_mode = 'rgb_array'),
+    ])
+    env = ImageObservationWrapper(vec, image_size = (16, 16))
+
+    try:
+        obs, _ = env.reset()
+        assert obs['image'].shape == (2, 3, 16, 16)
+
+        out = reset_env_at(env, 1, seed = 7)
+        assert out is not None
+        slot_obs, _ = out
+        assert slot_obs['image'].shape == (3, 16, 16)
+        assert slot_obs['state'].shape == (4,)
+
+        merged = write_slot_obs(obs, slot_obs, 1)
+        assert merged['image'].shape == (2, 3, 16, 16)
+    finally:
+        env.close()

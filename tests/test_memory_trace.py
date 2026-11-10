@@ -253,3 +253,71 @@ def test_memory_trace_all_export():
     import env_ssl_wrapper
     assert hasattr(env_ssl_wrapper, 'MemoryTraceWrapper')
 
+def test_memory_trace_2d_done_mask_with_1d_obs():
+    class ColumnDoneVecEnv:
+        is_vector = True
+        autoresets = True
+
+        def reset(self, **kwargs):
+            return torch.tensor([1.0, 2.0]), {}
+
+        def step(self, action):
+            # 1d batched scalar obs (2,) paired with column done mask (2, 1)
+            terminated = torch.tensor([[True], [False]])
+            return torch.tensor([10.0, 4.0]), torch.ones(2), terminated, torch.zeros((2, 1), dtype = torch.bool), {}
+
+    env = MemoryTraceWrapper(ColumnDoneVecEnv(), lambdas = 0.5)
+    env.reset()
+    obs, *_ = env.step(None)
+
+    assert obs['trace'].shape == (2,)
+    assert torch.allclose(obs['trace'], torch.tensor([10.0, 3.0]))
+
+def test_memory_trace_reset_at_and_sgs_composition():
+    import numpy as np
+    from env_ssl_wrapper import SGSWrapper, reset_env_at
+
+    class SlotResetVecEnv:
+        num_envs = 2
+        is_vector = True
+        autoresets = True
+
+        def __init__(self):
+            self.states = torch.ones(2, 2)
+
+        def reset(self, **kwargs):
+            self.states = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
+            return self.states.clone(), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            val = options['reset_to_state'] if isinstance(options, dict) and 'reset_to_state' in options else [9.0, 9.0]
+            self.states[index] = torch.as_tensor(val, dtype = torch.float32)
+            return self.states[index].clone(), {}
+
+        def step(self, action):
+            self.states = self.states + 2.0
+            done = torch.tensor([True, False])
+            return self.states.clone(), torch.ones(2), done, torch.zeros(2, dtype = torch.bool), {'is_success': np.array([True, False])}
+
+    env = MemoryTraceWrapper(SlotResetVecEnv(), lambdas = (0.5, 0.9))
+    env.reset()
+    env.step(None)  # slot 1 trace_0.5 becomes 0.5 * 2 + 0.5 * 4 = 3.0
+
+    slot_out = reset_env_at(env, 0)
+    assert slot_out is not None
+    slot_obs, _ = slot_out
+    assert slot_obs['obs'].shape == (2,)
+    assert torch.allclose(slot_obs['trace_0.5'], torch.tensor([9.0, 9.0]))
+    assert torch.allclose(slot_obs['trace_0.9'], torch.tensor([9.0, 9.0]))
+    # untouched slot 1 preserves its running trace
+    assert torch.allclose(env.traces['obs'][0][1], torch.tensor([3.0, 3.0]))
+
+    bank = np.array([[5.0, 5.0], [7.0, 7.0]], dtype = np.float32)
+    sgs_env = SGSWrapper(env, reset_configs = bank, default_prob = 0., seed = 0)
+    obs, _ = sgs_env.reset()
+    assert torch.allclose(obs['trace_0.5'], obs['obs'])
+
+    obs, *_ = sgs_env.step(None)
+    # slot 0 terminated so SGS reset it to a fresh bank state and reset its trace to match
+    assert torch.allclose(obs['trace_0.5'][0], obs['obs'][0])
+

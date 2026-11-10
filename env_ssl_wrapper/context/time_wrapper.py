@@ -56,9 +56,38 @@ class TimeWrapper(TransformObservationWrapper):
         self.vectorized = is_vectorized(env)
         self.times = torch.zeros(self.num_envs, dtype = torch.long)
 
+    def _attach_time(self, obs, value):
+        device = obs_device(obs)
+        return attach_obs(obs, self.key, value.to(device) if exists(device) else value, self.obs_key)
+
+    def _slot_value(self, index: int):
+        slot_time = self.times[index : index + 1]
+
+        if not exists(self.transform_fn):
+            return slot_time
+
+        out = self.transform_fn(slot_time)
+        return out[0] if self.vectorized else out
+
     def reset(self, **kwargs):
         self.times = torch.zeros_like(self.times)
         return super().reset(**kwargs)
+
+    def reset_at(self, index: int, seed = None, **kwargs):
+        from ..standardize.seeding import reset_env_at
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+
+        if not exists(out):
+            return None
+
+        obs, info = out
+        self.times[index] = 0
+        value = self._slot_value(index)
+
+        obs = self._attach_time(obs, value)
+        maybe_transform_final_observation(info, lambda final_obs: self._attach_time(final_obs, value))
+        return obs, info
 
     def transform_obs(self, obs, done = None):
         times = self.times
@@ -66,12 +95,11 @@ class TimeWrapper(TransformObservationWrapper):
         # autoreset slots return the new episode's first observation — time restarts from zero
 
         if exists(done):
-            times = times.masked_fill(done_mask(done, self.num_envs) & self.autoresets, 0)
+            mask = done_mask(done, self.num_envs, device = times.device) & self.autoresets
+            times = times.masked_fill(mask, 0)
 
         value = self.transform_fn(times) if exists(self.transform_fn) else (times.reshape(-1, 1) if self.vectorized else times)
-        device = obs_device(obs)
-
-        return attach_obs(obs, self.key, value.to(device) if exists(device) else value, self.obs_key)
+        return self._attach_time(obs, value)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
@@ -86,6 +114,6 @@ class TimeWrapper(TransformObservationWrapper):
         out = self.transform_obs(obs, done = done)
 
         if self.autoresets:
-            self.times[done_mask(done, self.num_envs)] = 0
+            self.times[done_mask(done, self.num_envs, device = self.times.device)] = 0
 
         return out, reward, terminated, truncated, info
