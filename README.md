@@ -303,6 +303,94 @@ uv run test_action_chunk.py --sweep=True                 # PPO over several chun
 uv run test_action_chunk.py --verify=True --sweep=True   # chunked rollouts match per-step reference
 ```
 
+### Latent Action
+
+Plug any module or callable between a higher-level policy and the environment — projecting a latent action into a primitive action, an open-loop action chunk, or a variable-horizon skill, while passing SMDP statistics back up through `info` and recording lower and higher trajectories for learning.
+
+```python
+import gymnasium as gym
+import torch
+from torch import nn
+from env_ssl_wrapper import StandardizeEnvWrapper, LatentActionWrapper
+
+decoder = nn.Linear(4, 1)  # latent (4,) -> primitive (1,)
+
+env = StandardizeEnvWrapper(gym.make('Pendulum-v1'))
+env = LatentActionWrapper(env, decoder, latent_dim = 4, bounds = (-1., 1.), clip_lower_actions = True)
+
+obs, info = env.reset()
+obs, reward, terminated, truncated, info = env.step(torch.randn(1, 4))
+```
+
+Returning `(batch, horizon, *action_shape)` executes the whole chunk in one `step`, stops early if the env terminates mid-chunk, discounts intra-chunk rewards by `gamma`, and exposes `info['duration']`, `info['discount']` (`gamma ** duration`), and `info['raw_reward']` for SMDP Bellman / GAE updates.
+
+For discrete skill banks, VQ codebooks, and accretive hierarchies, `ActionBankInterceptor` routes macro indices across one or more horizons:
+
+```python
+from env_ssl_wrapper import ActionBankInterceptor
+
+skills = ActionBankInterceptor.from_base(2)                  # start with dt = 1 primitives
+skills = skills.accrete(torch.tensor([[0, 0], [1, 1]]))      # union with a dt = 2 bank (mode = 'override' replaces)
+
+env = LatentActionWrapper(StandardizeEnvWrapper(gym.make('CartPole-v1')), skills, gamma = 0.99)
+obs, _ = env.reset()
+obs, reward, terminated, truncated, info = env.step(torch.tensor([2]))
+# info['duration'] -> executed steps, info['horizon'] -> skill length, info['bank_id'] -> bank index
+```
+
+Subclass `ActionInterceptor` when the layer itself is being learned. Start with `passthrough = True` to step primitive actions directly while populating `lower_buffer` (never crossing episode or reset boundaries), train the interceptor on sampled chunks, then flip `passthrough = False`:
+
+```python
+from einops import rearrange
+from env_ssl_wrapper import ActionInterceptor
+
+class ChunkAutoencoder(ActionInterceptor):
+    def __init__(self):
+        super().__init__(latent_dim = 4, passthrough = True)
+        self.decoder = nn.Sequential(nn.Linear(4, 4), nn.Tanh())
+
+    def translate(self, z):
+        return rearrange(self.decoder(z), 'b (h a) -> b h a', h = 4)
+
+interceptor = ChunkAutoencoder()
+env = LatentActionWrapper(StandardizeEnvWrapper(gym.make('Pendulum-v1')), interceptor, gamma = 0.99)
+
+# stage 1 - collect primitive rollouts and train the decoder
+obs, _ = env.reset()
+for _ in range(16):
+    obs, _, term, trunc, _ = env.step(torch.randn(1, 1))
+
+batch = interceptor.sample_lower_chunks(batch_size = 8, chunk_len = 4)   # batch.obs, batch.actions, batch.mask
+
+# stage 2 - expose the learned latent space to the actor (records higher_buffer and paired_buffer)
+env.passthrough = False
+obs, reward, term, trunc, info = env.step(torch.randn(1, 4))
+paired = interceptor.sample_paired(batch_size = 1)                       # pairs higher_action with lower substeps
+```
+
+For state-conditioned variable horizons, mid-chunk replanning, closed-loop options, and multi-level hierarchies:
+
+```python
+from env_ssl_wrapper import Translation, StepTranslation
+
+class AdaptiveSkill(ActionInterceptor):
+    def __init__(self):
+        super().__init__(latent_dim = 3)
+        self.net = nn.Linear(3 + 3, 4)
+
+    def translate(self, z, obs):
+        actions = rearrange(self.net(torch.cat((z, obs), dim = -1)), 'b (h a) -> b h a', h = 4)
+        lengths = torch.where(z[:, 0] > 0., 4, 2)
+        return Translation(actions = actions, lengths = lengths, info = dict(chosen_h = lengths))
+
+    def should_abort(self, obs, remaining_actions, remaining_lengths, *, step, **kwargs):
+        return obs[:, 0].abs() > 0.9   # early-exit the chunk mid-flight; sets info['aborted']
+```
+
+- **Closed-loop options**: override `step_lower(self, action, obs, step = 0)` returning `StepTranslation(action, done = ...)` instead of `translate` to re-query the interceptor at every primitive step up to `horizon`.
+- **Vectorized SMDP**: wrap `[make_env() for _ in range(n)]`, `SyncVectorEnv`, or `MultiprocessingVecEnv` — `translate` runs one batched forward pass while active slots step independently across heterogeneous horizons.
+- **Stacked hierarchies**: wrap `LatentActionWrapper(LatentActionWrapper(env, level_1, gamma = 0.99), level_2, gamma = 0.99)` — durations and discounts compound across levels automatically (`info['lower_info']` carries the inner layer's telemetry).
+
 ### Time, Past Action & State
 
 Small wrappers that append temporal context to the observation — the step index, and the actions and states that led into the current state.

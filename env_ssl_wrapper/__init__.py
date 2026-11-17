@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = '0.6.7'
+__version__ = '0.6.9'
 
 import sys as _sys
 
@@ -10,6 +10,19 @@ from .standardize import *  # noqa: F403
 from .memory_trace import MemoryTraceWrapper
 from .action_chunk import ActionChunkWrapper, ChunkTrace
 from .action_chunking import ActionChunks, make_action_chunks
+from .latent_action import (
+    LatentActionWrapper,
+    ActionInterceptorWrapper,
+    ActionInterceptor,
+    ActionBankInterceptor,
+    Translation,
+    StepTranslation,
+    LatentStepTrace,
+    ChunkBatch,
+    PairedBatch,
+    StreamBuffer,
+    PairedBuffer,
+)
 from .normalize import StateNormalizationWrapper, RunningMeanStd, combine_accumulators
 from .context import TimeWrapper, PastActionsWrapper, PastStatesWrapper, fourier_time
 from .sgs import (
@@ -69,6 +82,17 @@ __all__ = [
     'ChunkTrace',
     'ActionChunks',
     'make_action_chunks',
+    'LatentActionWrapper',
+    'ActionInterceptorWrapper',
+    'ActionInterceptor',
+    'ActionBankInterceptor',
+    'Translation',
+    'StepTranslation',
+    'LatentStepTrace',
+    'ChunkBatch',
+    'PairedBatch',
+    'StreamBuffer',
+    'PairedBuffer',
     'StateNormalizationWrapper',
     'RunningMeanStd',
     'combine_accumulators',
