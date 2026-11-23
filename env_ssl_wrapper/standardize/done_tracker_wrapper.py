@@ -100,6 +100,8 @@ class DoneTrackerWrapper(EnvWrapper):
 
         dones = dones_of(terminated, truncated)
         dones_np = to_numpy(dones).astype(bool)
+        if dones_np.ndim > 1:
+            dones_np = dones_np.any(axis = tuple(range(1, dones_np.ndim)))
 
         self.episode_lengths[active_before] += 1
         self.is_done |= dones_np

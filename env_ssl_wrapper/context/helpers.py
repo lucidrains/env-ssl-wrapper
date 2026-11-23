@@ -208,9 +208,11 @@ class HistoryWrapper(TransformObservationWrapper):
 
     def _reset_slot(self, index: int):
         if exists(self.history):
+            self.history = self.history.clone()
             self.history[index].zero_()
 
         if exists(self.history_mask):
+            self.history_mask = self.history_mask.clone()
             self.history_mask[index] = False
 
     def _step_with_item(self, action, item):

@@ -106,6 +106,9 @@ def copy_leaf(x):
 
     return x
 
+def copy_tree(x):
+    return tree_map(copy_leaf, x)
+
 def dones_of(terminated, truncated):
     return tree_map(lambda a, b: a | b, terminated, truncated)
 
@@ -225,22 +228,22 @@ def zero_leaf(x):
 
 _zero_leaf = zero_leaf
 
-def stack_leaves(leaves):
+def stack_leaves(leaves, axis = 0):
     if all(map(is_tensor, leaves)):
-        return torch.stack(leaves)
-    return np.stack(leaves)
+        return torch.stack(leaves, dim = axis)
+    return np.stack(leaves, axis = axis)
 
-def stack_trees(trees):
+def stack_trees(trees, axis = 0):
     first = trees[0]
 
     if is_tensor(first):
-        return torch.stack(trees)
+        return torch.stack(trees, dim = axis)
 
     if isinstance(first, np.ndarray):
-        return np.stack(trees)
+        return np.stack(trees, axis = axis)
 
     leaves = [tree_flatten(tree)[0] for tree in trees]
-    stacked = [stack_leaves(col) for col in zip(*leaves)]
+    stacked = [stack_leaves(col, axis = axis) for col in zip(*leaves)]
     return tree_unflatten(stacked, tree_structure(first))
 
 def unpack_vector_observations(arr):

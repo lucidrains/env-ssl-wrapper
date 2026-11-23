@@ -27,7 +27,7 @@ def to_torch_leaf(t, device, cast_obs_to_float = True):
         elif is_scalar(t):
             t = tensor(t)
         elif is_foreign_array(t):
-            t = from_numpy(np.asarray(t))
+            t = from_numpy(np.asarray(t).copy())
         else:
             return t
 

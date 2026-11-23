@@ -919,3 +919,70 @@ def test_frontier_small_banks_and_unweighted_boundary_smoothing():
 
     diffs = torch.linspace(0., 1., 3)
     assert difficulty_frontier(torch.tensor([0.9, 0.9, 0.1]), torch.tensor([5, 5, 5]), diffs, threshold = 0.5, kernel = 5) == pytest.approx(float(diffs[1]))
+
+def test_sgs_logging_skips_uncredited_and_hits_batched_milestones():
+    sampler = SGSSampler([np.array([0.]), np.array([1.])], log_every = 2, seed = 0)
+
+    # uncredited (-1) updates must never produce a step-0 snapshot
+    sampler.update([-1, -1], [1., 0.])
+    assert len(sampler.trace) == 0
+
+    # batched update crossing multiple milestones must record each one
+    sampler.update([0, 1, 0, 1], [1., 0., 1., 1.])
+    assert [snap['step'] for snap in sampler.trace] == [2, 4]
+
+    # trailing uncredited update must not duplicate step 4
+    sampler.update([-1], [1.])
+    assert [snap['step'] for snap in sampler.trace] == [2, 4]
+
+def test_sgs_wrapper_owns_reset_with_default_prob_fallback():
+    env = SGSWrapper(
+        StandardizeEnvWrapper(ConfigurableGoalEnv),
+        [np.array([0.2, 0.0])],
+        autoresets = True,
+        default_prob = 1.,
+        seed = 0,
+    )
+    env.reset()
+
+    # episode finishes and default_prob = 1 draws None — wrapper must still reset the inner env
+    for _ in range(12):
+        obs, _, term, trunc, _ = env.step(torch.zeros(1, 2))
+        if bool((term | trunc).any()):
+            break
+
+    # next step must succeed rather than crashing DoneTrackerWrapper.needs_reset
+    obs, *_ = env.step(torch.zeros(1, 2))
+    assert obs.shape == (1, 2)
+
+def test_sgs_wrapper_reset_at_updates_slot_state():
+    class SlotEnv:
+        num_envs = 2
+        is_vector = True
+
+        def __init__(self):
+            self.states = np.zeros((2, 2), dtype = np.float32)
+
+        def reset(self, *, options = None, **kwargs):
+            self.states[:] = 0.
+            return self.states.copy(), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            if isinstance(options, dict) and 'reset_to_state' in options:
+                self.states[index] = np.asarray(options['reset_to_state'], dtype = np.float32)
+            return self.states[index].copy(), {}
+
+        def step(self, action):
+            return self.states.copy(), np.ones(2, dtype = np.float32), np.array([True, False]), np.zeros(2, dtype = bool), {}
+
+    bank = [np.array([1., 1.], dtype = np.float32), np.array([2., 2.], dtype = np.float32)]
+    env = SGSWrapper(SlotEnv(), bank, default_prob = 0., seed = 0)
+    env.reset()
+    env.step(None)
+
+    out = reset_env_at(env, 0)
+    assert out is not None
+    slot_obs, slot_info = out
+    assert slot_obs.shape == (2,)
+    assert slot_info['sgs_config_id'] == int(env.current_config_ids[0])
+    assert not env._done_since_reset[0]

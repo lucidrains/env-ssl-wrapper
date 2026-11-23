@@ -58,6 +58,7 @@ class MemoryTraceWrapper(TransformObservationWrapper):
         super().__init__(env)
 
         self.lambdas = tuple(float(l) for l in cast_tuple(lambdas))
+        assert len(self.lambdas) > 0, 'lambdas must not be empty'
         assert all(0. <= l <= 1. for l in self.lambdas), f'lambdas must be within [0, 1], got {self.lambdas}'
 
         self.trace_key = trace_key
@@ -77,8 +78,7 @@ class MemoryTraceWrapper(TransformObservationWrapper):
             return dict(obs)
         return {self.obs_key: obs}
 
-    def transform_obs(self, obs, done = None, update_state: bool = True):
-        out = self._to_obs_dict(obs)
+    def _iter_targets(self, out):
         target_keys = tuple(k for k in default(self.keys, tuple(out.keys())) if k in out)
 
         for key in target_keys:
@@ -95,7 +95,12 @@ class MemoryTraceWrapper(TransformObservationWrapper):
                 out[key] = val
 
             val_float = val.float() if not val.is_floating_point() else val
+            yield key, val_float
 
+    def transform_obs(self, obs, done = None, update_state: bool = True):
+        out = self._to_obs_dict(obs)
+
+        for key, val_float in self._iter_targets(out):
             # init or lerp update traces
             # z_t = λ * z_{t-1} + (1 - λ) * y_t
 
@@ -117,29 +122,19 @@ class MemoryTraceWrapper(TransformObservationWrapper):
 
     def _reset_slot_obs(self, obs, index: int, update_state: bool = True):
         out = self._to_obs_dict(obs)
-        target_keys = tuple(k for k in default(self.keys, tuple(out.keys())) if k in out)
 
-        for key in target_keys:
-            val = out.get(key)
-
-            if not exists(val) or not (is_array_like(val) or is_scalar(val)):
-                continue
-
-            if not is_tensor(val):
-                try:
-                    val = torch.as_tensor(val)
-                except (TypeError, ValueError):
-                    continue
-                out[key] = val
-
-            val_float = val.float() if not val.is_floating_point() else val
-
+        for key, val_float in self._iter_targets(out):
             if update_state and key in self.traces:
+                updated = []
                 for prev in self.traces[key]:
-                    if prev.ndim > val_float.ndim:
-                        prev[index] = val_float.to(device = prev.device, dtype = prev.dtype)
+                    nxt = prev.clone()
+                    src = val_float.to(device = nxt.device, dtype = nxt.dtype)
+                    if nxt.ndim > src.ndim:
+                        nxt[index] = src
                     else:
-                        prev.copy_(val_float.to(device = prev.device, dtype = prev.dtype))
+                        nxt.copy_(src)
+                    updated.append(nxt)
+                self.traces[key] = updated
 
             for lam in self.lambdas:
                 out[self.trace_key_for(key, lam)] = val_float.clone()

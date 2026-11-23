@@ -754,3 +754,15 @@ def test_combine_accumulators_clip_non_empty_and_accelerator_moments():
         count, mean, var = rms.real_moments()
         packed = torch.cat([mean.new_tensor([count]), mean.reshape(-1), var.reshape(-1)])
         assert packed.device.type == accel
+
+def test_running_mean_std_load_state_dict_isolates_tensors():
+    src = RunningMeanStd(shape = (2,), prior_count = 1.).update(torch.tensor([[1., 2.], [3., 4.]]))
+    state = src.state_dict()
+
+    a = RunningMeanStd(shape = (2,), prior_count = 1.).load_state_dict(state)
+    b = RunningMeanStd(shape = (2,), prior_count = 1.).load_state_dict(state)
+    a.reset()
+
+    assert torch.allclose(b.mean, src.mean)
+    assert torch.allclose(b.var, src.var)
+    assert torch.allclose(state['mean'], src.mean)

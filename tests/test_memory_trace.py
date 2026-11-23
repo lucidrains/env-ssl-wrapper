@@ -321,3 +321,30 @@ def test_memory_trace_reset_at_and_sgs_composition():
     # slot 0 terminated so SGS reset it to a fresh bank state and reset its trace to match
     assert torch.allclose(obs['trace_0.5'][0], obs['obs'][0])
 
+def test_memory_trace_empty_lambdas_and_reset_at_no_aliasing():
+    from env_ssl_wrapper import reset_env_at
+
+    with pytest.raises(AssertionError):
+        MemoryTraceWrapper(MockEnv(), lambdas = ())
+
+    class SlotVecEnv:
+        num_envs = 2
+        is_vector = True
+
+        def reset(self, **kwargs):
+            return torch.tensor([[1., 1.], [2., 2.]]), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            return torch.tensor([9., 9.]), {}
+
+        def step(self, action):
+            return torch.tensor([[3., 3.], [4., 4.]]), torch.ones(2), torch.zeros(2, dtype = torch.bool), torch.zeros(2, dtype = torch.bool), {}
+
+    env = MemoryTraceWrapper(SlotVecEnv(), lambdas = 0.5)
+    env.reset()
+    obs1, *_ = env.step(None)
+    snapshot = obs1['trace'].clone()
+
+    reset_env_at(env, 0)
+    assert torch.equal(obs1['trace'], snapshot)
+

@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from functools import partial
+from importlib import import_module
 
 from .standardize_wrapper import StandardizeWrapper
 from .image_wrapper import ImageObservationWrapper
@@ -22,46 +24,40 @@ WRAPPERS = dict(
     done = DoneTrackerWrapper,
     flatten_obs = FlattenObsWrapper,
     time_limit = TimeLimitWrapper,
-    pad_episodes = EpisodePaddingWrapper
+    pad_episodes = EpisodePaddingWrapper,
 )
 
+# lazy registry for research / top-level wrappers: canonical name -> (aliases, module, attr)
+
+_LAZY_WRAPPERS = (
+    (('standardize_env', 'master'), '.standardize_env_wrapper', 'StandardizeEnvWrapper'),
+    (('memory_trace',), '..memory_trace', 'MemoryTraceWrapper'),
+    (('action_chunk', 'chunk'), '..action_chunk', 'ActionChunkWrapper'),
+    (('latent_action', 'action_interceptor'), '..latent_action', 'LatentActionWrapper'),
+    (('time', 'timestep'), '..context', 'TimeWrapper'),
+    (('past_action', 'past_actions'), '..context', 'PastActionsWrapper'),
+    (('past_state', 'past_states'), '..context', 'PastStatesWrapper'),
+    (('sgs', 'success_guided_sampling'), '..sgs', 'SGSWrapper'),
+    (('state_norm', 'normalize_state', 'normalization'), '..normalize', 'StateNormalizationWrapper'),
+)
+
+_LAZY_LOOKUP = {
+    alias: (module, attr)
+    for aliases, module, attr in _LAZY_WRAPPERS
+    for alias in aliases
+}
+
+_CANONICAL_NAMES = sorted([*WRAPPERS, *(aliases[0] for aliases, _, _ in _LAZY_WRAPPERS)])
+
 def get_wrapper(name):
-    if name in ('standardize_env', 'master'):
-        from .standardize_env_wrapper import StandardizeEnvWrapper
-        return StandardizeEnvWrapper
-
-    if name == 'memory_trace':
-        from ..memory_trace import MemoryTraceWrapper
-        return MemoryTraceWrapper
-
-    if name in ('action_chunk', 'chunk'):
-        from ..action_chunk import ActionChunkWrapper
-        return ActionChunkWrapper
-
-    if name in ('time', 'timestep'):
-        from ..context import TimeWrapper
-        return TimeWrapper
-
-    if name in ('past_action', 'past_actions'):
-        from ..context import PastActionsWrapper
-        return PastActionsWrapper
-
-    if name in ('past_state', 'past_states'):
-        from ..context import PastStatesWrapper
-        return PastStatesWrapper
-
-    if name in ('sgs', 'success_guided_sampling'):
-        from ..sgs import SGSWrapper
-        return SGSWrapper
-
-    if name in ('state_norm', 'normalize_state', 'normalization'):
-        from ..normalize import StateNormalizationWrapper
-        return StateNormalizationWrapper
+    if name in _LAZY_LOOKUP:
+        module, attr = _LAZY_LOOKUP[name]
+        return getattr(import_module(module, __package__), attr)
 
     if name in WRAPPERS:
         return WRAPPERS[name]
 
-    raise ValueError(f'unknown wrapper {name!r} — choose from {sorted([*WRAPPERS, "memory_trace", "action_chunk", "time", "past_action", "past_state", "sgs", "state_norm", "standardize_env"])}')
+    raise ValueError(f'unknown wrapper {name!r} — choose from {_CANONICAL_NAMES}')
 
 def parse_wrapper(wrapper):
     if isinstance(wrapper, str):

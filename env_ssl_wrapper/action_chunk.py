@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
+import einx
 import numpy as np
 import torch
 from einops import rearrange, reduce
-from torch import is_tensor
-from torch.utils._pytree import tree_map
+from torch import Tensor, is_tensor
+from torch.nn.functional import pad
 from torch_einops_utils.shape import size
 
 from .standardize.helpers import (
     EnvWrapper,
     any_true,
     copy_leaf,
+    copy_tree,
     default,
     dones_of,
     env_takes_torch,
@@ -23,26 +25,74 @@ from .standardize.helpers import (
     is_vectorized,
     normalize_reset_out,
     normalize_step_out,
+    stack_trees,
     to_numpy,
 )
 
 # helpers
 
-def stack_axis(steps, axis):
-    return torch.stack(steps, dim = axis) if is_tensor(steps[0]) else np.stack(steps, axis = axis)
-
 def stack_steps(steps):
-    return stack_axis(steps, -1)
-
-def stack_trees(items, axis = -1):
-    # stack corresponding leaves across per-step pytrees - obs may be a dict / tuple
-    return tree_map(lambda *leaves: stack_axis(list(leaves), axis), *items)
-
-def copy_tree(x):
-    return tree_map(copy_leaf, x)
+    return stack_trees(steps, axis = -1)
 
 def chunk_steps(actions):
     return rearrange(actions, 'b t ... -> t b ...')
+
+# critic-side sliding action chunks
+#
+# actions: (..., time, action_dim)
+# at step t the chunk is actions[t : t + chunk_len], right padded at episode end
+# action_mask says which slots are real; valid says whether the whole chunk fits
+
+class ActionChunks(NamedTuple):
+    actions: Tensor       # (..., time, chunk_len * action_dim), or (..., time, chunk_len, action_dim)
+    action_mask: Tensor   # (..., time, chunk_len) - False for right padding
+    valid: Tensor         # (..., time) - True only when the whole chunk fits
+    chunk_len: int
+    action_dim: int
+
+    @property
+    def time(self):
+        return size(self.action_mask, '... t k -> t')
+
+def make_action_chunks(
+    actions: Tensor,
+    chunk_len: int,
+    lens: Tensor | int | None = None,
+    pad_value: float = 0.,
+    flatten: bool = True
+) -> ActionChunks:
+    assert actions.ndim >= 2, 'actions must be (..., time, action_dim)'
+    assert chunk_len >= 1, f'chunk_len must be at least 1, got {chunk_len}'
+
+    time = size(actions, '... t d -> t')
+    action_dim = size(actions, '... t d -> d')
+    batch_shape = actions.shape[:-2]
+
+    assert time >= 1, 'actions must have at least one time step'
+
+    device = actions.device
+
+    lens = torch.as_tensor(default(lens, time), device = device, dtype = torch.long)
+    lens = torch.broadcast_to(lens, batch_shape).clamp(min = 0, max = time)
+
+    # right-pad the action stream, then take every length-chunk_len window
+
+    padded = pad(actions, (0, 0, 0, chunk_len - 1), value = pad_value)
+    chunks = rearrange(padded.unfold(dimension = -2, size = chunk_len, step = 1), '... t d k -> ... t k d')
+
+    steps = torch.arange(time, device = device)
+    offsets = torch.arange(chunk_len, device = device)
+    times = einx.add('t, k -> t k', steps, offsets)
+
+    action_mask = einx.less('t k, ... -> ... t k', times, lens)
+    valid = einx.less('t, ... -> ... t', steps + chunk_len - 1, lens)
+
+    chunks = einx.where('... t k, ... t k d, -> ... t k d', action_mask, chunks, actions.new_full((), pad_value))
+
+    if flatten:
+        chunks = rearrange(chunks, '... t k d -> ... t (k d)')
+
+    return ActionChunks(chunks, action_mask, valid, chunk_len, action_dim)
 
 # per-env-step trace of one chunk
 # next_observations are s_{t+1} .. s_{t+L}; prepend the decision obs to get s_t .. s_{t+L}
@@ -72,12 +122,11 @@ class ChunkTrace:
         # right-pad the executed actions to chunk_len; the mask says which slots are real
         actions, mask = self.actions, self.action_mask
         is_batched = mask.ndim == 2
+        shape = (actions.shape[0], self.chunk_len, *actions.shape[2:]) if is_batched else (self.chunk_len, *actions.shape[1:])
 
         if is_tensor(actions):
-            shape = (actions.shape[0], self.chunk_len, *actions.shape[2:]) if is_batched else (self.chunk_len, *actions.shape[1:])
             padded = actions.new_full(shape, fill)
         elif isinstance(actions, np.ndarray):
-            shape = (actions.shape[0], self.chunk_len, *actions.shape[2:]) if is_batched else (self.chunk_len, *actions.shape[1:])
             padded = np.full(shape, fill, dtype = actions.dtype)
         else:
             raise TypeError(f'padded_actions expects an array or tensor, got {type(actions).__name__}')
@@ -165,6 +214,30 @@ class ActionChunkWrapper(EnvWrapper):
         assert self.expects_batch or actions.shape[0] == 1, 'single env takes one action chunk at a time'
         return actions
 
+    def _aggregate_rewards(self, rewards, executed_len: int):
+        if self.reward_mode == 'chunk':
+            return rewards
+
+        if self.reward_mode == 'last':
+            return rewards[..., -1]
+
+        if self.reward_mode == 'mean':
+            if is_tensor(rewards) and not rewards.is_floating_point():
+                rewards = rewards.float()
+            return reduce(rewards, '... k -> ...', 'mean')
+
+        if self.gamma != 1.:
+            if is_tensor(rewards):
+                dtype = rewards.dtype if rewards.is_floating_point() else torch.float32
+                discounts = (self.gamma ** torch.arange(executed_len, device = rewards.device)).to(dtype = dtype)
+            else:
+                dtype = rewards.dtype if np.issubdtype(rewards.dtype, np.floating) else np.float32
+                discounts = (self.gamma ** np.arange(executed_len)).astype(dtype)
+
+            return reduce(rewards * discounts, '... k -> ...', 'sum')
+
+        return reduce(rewards, '... k -> ...', 'sum')
+
     def reset(self, **kwargs):
         return normalize_reset_out(self.env.reset(**kwargs))
 
@@ -218,24 +291,7 @@ class ActionChunkWrapper(EnvWrapper):
 
         rewards = stack_steps(rewards)
         executed_len = num_steps
-
-        if self.reward_mode == 'chunk':
-            reward = rewards
-        elif self.reward_mode == 'last':
-            reward = rewards[..., -1]
-        elif self.reward_mode == 'mean':
-            reward = reduce(rewards, '... k -> ...', 'mean')
-        elif self.gamma != 1.:
-            if is_tensor(rewards):
-                dtype = rewards.dtype if rewards.is_floating_point() else torch.float32
-                discounts = (self.gamma ** torch.arange(executed_len, device = rewards.device)).to(dtype = dtype)
-            else:
-                dtype = rewards.dtype if np.issubdtype(rewards.dtype, np.floating) else np.float32
-                discounts = (self.gamma ** np.arange(executed_len)).astype(dtype)
-
-            reward = reduce(rewards * discounts, '... k -> ...', 'sum')
-        else:
-            reward = reduce(rewards, '... k -> ...', 'sum')
+        reward = self._aggregate_rewards(rewards, executed_len)
 
         info = dict(info) if isinstance(info, dict) else {}
         info['chunk_length'] = executed_len
@@ -260,10 +316,10 @@ class ActionChunkWrapper(EnvWrapper):
                 next_observations = stack_trees(trace_obs, axis = time_axis),
                 actions = stack_trees(trace_actions, axis = time_axis),
                 action_mask = action_mask,
-                rewards = stack_trees(trace_rewards),
-                terminated = stack_trees(trace_terminated),
-                truncated = stack_trees(trace_truncated),
-                dones = stack_trees(trace_dones),
+                rewards = stack_trees(trace_rewards, axis = -1),
+                terminated = stack_trees(trace_terminated, axis = -1),
+                truncated = stack_trees(trace_truncated, axis = -1),
+                dones = stack_trees(trace_dones, axis = -1),
                 infos = tuple(trace_infos),
                 chunk_len = self.chunk_len,
                 executed_len = executed_len

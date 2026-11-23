@@ -776,3 +776,41 @@ def test_time_limit_integer_and_float_dones():
         _, _, term, trunc, _ = env.step(None)
         assert np.array_equal(np.asarray(term, dtype = bool), [True, False])
         assert np.array_equal(np.asarray(trunc, dtype = bool), [False, True])
+
+def test_wrapper_adapter_render_delegates_to_inner_adapter():
+    from env_ssl_wrapper import ActionTransformWrapper, get_adapter
+    from env_ssl_wrapper.mocks import PyBulletMockEnv
+
+    # wrapping a simulator should still use its adapter's render path (not bypass via __getattr__)
+    env = ActionTransformWrapper(PyBulletMockEnv())
+    frame = get_adapter(env).render(32, 32)
+    assert frame is not None and frame.shape == (32, 32, 3)
+
+    # wrapping a gym env without render_mode should return None cleanly
+    import gymnasium as gym
+    no_render = ActionTransformWrapper(gym.make('CartPole-v1'))
+    assert get_adapter(no_render).render(32, 32) is None
+    no_render.close()
+
+def test_episode_padding_reset_at_no_in_place_aliasing():
+    from env_ssl_wrapper import EpisodePaddingWrapper, reset_env_at
+
+    class SlotVecEnv:
+        num_envs = 2
+        is_vector = True
+
+        def reset(self, **kwargs):
+            return torch.tensor([[1., 1.], [2., 2.]]), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            return torch.tensor([9., 9.]), {}
+
+        def step(self, action):
+            return torch.tensor([[3., 3.], [4., 4.]]), torch.ones(2), torch.zeros(2, dtype = torch.bool), torch.zeros(2, dtype = torch.bool), {}
+
+    env = EpisodePaddingWrapper(SlotVecEnv())
+    obs0, _ = env.reset()
+    snap = obs0.clone()
+
+    reset_env_at(env, 0)
+    assert torch.equal(obs0, snap)

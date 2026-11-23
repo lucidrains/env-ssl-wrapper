@@ -37,10 +37,12 @@ def render_frame(env, image_size = (64, 64), camera = None):
 
         img = env.render()
 
-    if isinstance(img, torch.Tensor):
-        img = img.detach().cpu().numpy()
+    assert exists(img), 'environment render() returned None'
 
-    img = torch.from_numpy(np.ascontiguousarray(img))
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu().contiguous()
+    else:
+        img = torch.from_numpy(np.ascontiguousarray(img))
 
     if img.ndim == 4:
         return rearrange(img, 'b h w c -> b c h w'), True

@@ -167,7 +167,7 @@ class RunningMeanStd:
         m2 = self.var * self.count + batch_var * count + delta.square() * (self.count * count / total)
 
         self.mean = self.mean + delta * (count / total)
-        self.var = m2 / total
+        self.var = (m2 / total).clamp(min = 0.)
         self.count = total
         return self
 
@@ -214,8 +214,8 @@ class RunningMeanStd:
             assert tuple(state['shape']) == self.shape, f'expected statistics of shape {self.shape}, got {state["shape"]}'
 
         self.count = float(state['count'])
-        self.mean = self.as_tensor(state['mean'])
-        self.var = self.as_tensor(state['var'])
+        self.mean = self.as_tensor(state['mean']).clone()
+        self.var = self.as_tensor(state['var']).clone()
         return self
 
     def copy(self):
@@ -249,7 +249,7 @@ class RunningMeanStd:
             return 0., torch.zeros_like(self.mean), torch.zeros_like(self.mean)
 
         mean = self.mean * (n / n_real)
-        m2 = self.var * n - prior - mean.square() * (prior * n_real / n)
+        m2 = (self.var * n - prior - mean.square() * (prior * n_real / n)).clamp(min = 0.)
         return n_real, mean, m2
 
     def all_reduce(self, group = None):

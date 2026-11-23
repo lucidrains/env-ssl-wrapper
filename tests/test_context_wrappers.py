@@ -869,3 +869,51 @@ def test_context_wrappers_reset_at_and_sgs():
     assert torch.allclose(sgs_obs['past_state'][0], torch.zeros(2, 2))
     assert sgs_obs['has_past_states'][0].tolist() == [False, False]
     assert sgs_obs['has_past_states'][1].tolist() == [False, True]
+
+def test_context_wrappers_do_not_mutate_previous_observations_in_place():
+    from env_ssl_wrapper import reset_env_at
+
+    class SlotVecEnv:
+        num_envs = 2
+        is_vector = True
+        autoresets = True
+        action_space = DiscreteSpace(2)
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return torch.ones(2, 2), {}
+
+        def reset_at(self, index, *, seed = None, options = None):
+            return torch.full((2,), 9.), {}
+
+        def step(self, action):
+            self.t += 1
+            return torch.full((2, 2), float(self.t + 1)), torch.ones(2), torch.tensor([self.t == 2, False]), torch.zeros(2, dtype = torch.bool), {}
+
+    env = TimeWrapper(SlotVecEnv())
+    env = PastActionsWrapper(env, num_past_actions = 2, has_past_actions_key = 'has_past_actions')
+    env = PastStatesWrapper(env, num_past_states = 2, has_past_states_key = 'has_past_states')
+
+    obs0, _ = env.reset()
+    obs1, *_ = env.step(torch.tensor([1, 0]))
+    obs2, *_ = env.step(torch.tensor([0, 1]))
+
+    # stepping must never mutate previously returned obs['time'] tensors
+    assert obs0['time'].tolist() == [[0], [0]]
+    assert obs1['time'].tolist() == [[1], [1]]
+    assert obs2['time'].tolist() == [[0], [2]]
+
+    # reset_at must never mutate previously returned history or time tensors
+    prev_time = obs2['time'].clone()
+    prev_act = obs2['past_action'].clone()
+    prev_act_mask = obs2['has_past_actions'].clone()
+    prev_state = obs2['past_state'].clone()
+    prev_state_mask = obs2['has_past_states'].clone()
+
+    reset_env_at(env, 1)
+
+    assert torch.equal(obs2['time'], prev_time)
+    assert torch.equal(obs2['past_action'], prev_act)
+    assert torch.equal(obs2['has_past_actions'], prev_act_mask)
+    assert torch.equal(obs2['past_state'], prev_state)
+    assert torch.equal(obs2['has_past_states'], prev_state_mask)

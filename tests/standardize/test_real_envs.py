@@ -176,8 +176,14 @@ def ant_maze():
     _register_robotics()
     return gym.make('AntMaze_UMaze-v3')
 
-def pusht():
+def _skip_if_pusht_incompatible():
     pytest.importorskip('gym_pusht')
+    pymunk = pytest.importorskip('pymunk')
+    if not hasattr(pymunk.Space, 'add_collision_handler'):
+        pytest.skip('gym_pusht requires pymunk < 7 (missing Space.add_collision_handler)')
+
+def pusht():
+    _skip_if_pusht_incompatible()
     return gym.make('gym_pusht/PushT-v0', render_mode = 'rgb_array')
 
 def dmc_reacher():
@@ -353,7 +359,7 @@ def test_gym_pusht_standardize_env():
     assert total_reward.shape == (1,)
 
 def test_gym_pusht_vector_standardize_env():
-    pytest.importorskip('gym_pusht')
+    _skip_if_pusht_incompatible()
     from gymnasium.vector import SyncVectorEnv
 
     try:
@@ -429,11 +435,11 @@ def test_pybullet_cartpole_standardize_and_seed():
 # verify end-to-end learning convergence of vectorized PPO on standardized envs
 
 def test_vectorized_ppo_cartpole_learns():
-    import verify_ppo
+    verify_ppo = pytest.importorskip('verify_ppo')
     ret = verify_ppo.train_vectorized_ppo_cartpole(total_steps = 12_000, target_return = 120.0)
     assert ret > 50.0
 
 def test_vectorized_ppo_inverted_pendulum_learns():
-    import verify_ppo
+    verify_ppo = pytest.importorskip('verify_ppo')
     ret = verify_ppo.train_vectorized_ppo_inverted_pendulum(total_steps = 15_000, target_return = 100.0)
     assert ret > 30.0

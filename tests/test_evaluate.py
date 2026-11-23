@@ -394,3 +394,51 @@ def test_evaluate_actor_seeds_legacy_seed_method_env():
     evaluate_actor(zero_actor, env, episodes = 2, seed = 42)
 
     assert env.seeded == [42, 43]
+
+def test_evaluate_actor_dict_obs_trace_and_vector_duration():
+    from env_ssl_wrapper import ActionBankInterceptor, LatentActionWrapper, TimeWrapper
+
+    traces = []
+    env = TimeWrapper(StandardizeEnvWrapper(GymnasiumMockEnv()))
+    evaluate_actor(zero_actor, env, episodes = 1, max_steps = 3, on_episode = traces.append)
+
+    assert len(traces) == 1
+    assert len(traces[0]['states']) == 3
+    assert isinstance(traces[0]['states'][0], dict) and 'obs' in traces[0]['states'][0] and 'time' in traces[0]['states'][0]
+
+    # vectorized LatentActionWrapper tracks per-slot primitive duration as episode length
+    class ShortDiscEnv:
+        def __init__(self, term_at):
+            self.term_at = term_at
+            self.t = 0
+            self.action_space = GymnasiumDiscreteMockEnv().action_space
+            self.observation_space = GymnasiumDiscreteMockEnv().observation_space
+
+        def reset(self, **kwargs):
+            self.t = 0
+            return np.zeros(4, dtype = np.float32), {}
+
+        def step(self, action):
+            self.t += 1
+            return np.zeros(4, dtype = np.float32), 1.0, self.t >= self.term_at, False, {}
+
+    bank = ActionBankInterceptor(np.array([[0, 0], [1, 1]], dtype = np.int64))
+    vec = LatentActionWrapper([ShortDiscEnv(4), ShortDiscEnv(6)], bank, gamma = 1.0)
+    stats = evaluate_actor(lambda obs: torch.zeros(obs.shape[0], dtype = torch.long), vec, episodes = 2)
+
+    assert sorted(stats.lengths.tolist()) == [4.0, 6.0]
+    assert sorted(stats.returns.tolist()) == [4.0, 6.0]
+
+def test_evaluate_actor_rejects_np_bool_false_video_select(tmp_path):
+    video_path = tmp_path / 'none.mp4'
+    stats = evaluate_actor(
+        zero_actor,
+        GymnasiumMockEnv(),
+        episodes = 2,
+        max_steps = 2,
+        video_path = str(video_path),
+        video_select = lambda ep: np.bool_(False),
+    )
+
+    assert stats.videos == ()
+    assert not video_path.exists()

@@ -12,7 +12,6 @@ import torch.nn.functional as F
 
 from .standardize.helpers import (
     EnvWrapper,
-    any_true,
     copy_leaf,
     default,
     divisible_by,
@@ -21,6 +20,7 @@ from .standardize.helpers import (
     env_num_envs,
     exists,
     first_existing,
+    get_attr,
     is_vectorized,
     normalize_reset_out,
     normalize_step_out,
@@ -876,8 +876,7 @@ class SGSSampler:
                 self.history[idx].append(float(val_raw))
                 self.counts[idx] += 1
                 self.step_count += 1
-
-        self.log()
+                self.log()
 
     def log(self):
         # snapshot in memory, and append to the csv when log_path is set
@@ -1031,7 +1030,40 @@ class SGSWrapper(EnvWrapper):
             return False, obs
 
         slot_obs, _ = out
+        if not self.is_vector and not get_attr(self.env, 'is_auto_batched', False):
+            return True, slot_obs
         return True, write_slot_obs(obs, slot_obs, i)
+
+    def reset_at(self, index: int, seed = None, **kwargs):
+        index = int(index)
+        options = kwargs.get('options')
+        explicit = isinstance(options, dict) and (self.options_key in options or 'config_id' in options)
+
+        if self.enabled and not explicit:
+            state, cfg_id = self.sampler.sample()
+        else:
+            state = None
+            cfg_id = options.get('config_id', -1) if isinstance(options, dict) else -1
+
+        if self.enabled and not explicit and exists(state) and not exists(self.set_state_fn):
+            kwargs['options'] = {**(options or {}), **self._options(state, cfg_id)}
+
+        out = reset_env_at(self.env, index, seed = seed, **kwargs)
+        if not exists(out):
+            return None
+
+        obs, info = out
+
+        if self.enabled and not explicit and exists(state) and exists(self.set_state_fn):
+            obs = default(call_hook(self.set_state_fn, self.env, state, cfg_id, obs), obs)
+
+        self.current_config_ids[index] = cfg_id
+        self.current_states[index] = state
+        self._done_since_reset[index] = False
+
+        info = dict(info) if isinstance(info, dict) else {}
+        info['sgs_config_id'] = int(cfg_id)
+        return obs, info
 
     def reset(self, **kwargs):
         options = kwargs.get('options')
@@ -1098,7 +1130,15 @@ class SGSWrapper(EnvWrapper):
 
         if not exists(state):
             self.current_config_ids[i], self.current_states[i] = -1, None
-            return obs
+            if not self._owns_reset:
+                return obs
+            if self.num_envs == 1:
+                out = normalize_reset_out(self.env.reset())
+                return out[0] if exists(out) and exists(out[0]) else obs
+            out = reset_env_at(self.env, i)
+            if not exists(out):
+                return obs
+            return out[0] if (not self.is_vector and not get_attr(self.env, 'is_auto_batched', False)) else write_slot_obs(obs, out[0], i)
 
         ok, obs = self._apply(i, state, cfg_id, obs)
         self.current_config_ids[i] = cfg_id if ok else -1

@@ -10,6 +10,7 @@ from torch.utils._pytree import tree_map
 from .helpers import (
     EnvWrapper,
     copy_leaf,
+    copy_tree,
     dones_of,
     env_autoresets,
     exists,
@@ -103,7 +104,7 @@ class EpisodePaddingWrapper(EnvWrapper):
         obs, info = out
 
         if exists(self._last_obs):
-            self._last_obs = write_slot_obs(self._last_obs, obs, index)
+            self._last_obs = write_slot_obs(copy_tree(self._last_obs), obs, index)
 
         if exists(self._is_done):
             self._is_done[index] = False
@@ -119,6 +120,8 @@ class EpisodePaddingWrapper(EnvWrapper):
 
             dones = dones_of(terminated, truncated)
             mask = to_numpy(dones).astype(bool)
+            if mask.ndim > 1:
+                mask = mask.any(axis = tuple(range(1, mask.ndim)))
 
             if not exists(self._is_done) or len(self._is_done) != len(mask):
                 self._is_done = np.zeros(len(mask), dtype = bool)

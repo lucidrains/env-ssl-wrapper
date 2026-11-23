@@ -571,6 +571,7 @@ Pass wrappers as strings (default config) or `(name, dict)` tuples (custom confi
 | `tensor` | NumPy → torch on a device, torch actions → numpy for the sim. |
 | `flatten_obs` | Flattens dict/tuple observations into a single vector. |
 | `action_chunk` | Executes actions in open-loop chunks of length k. `('action_chunk', dict(chunk_len = 2, gamma = 0.99))` |
+| `latent_action` | Translates latent / macro actions through an `ActionInterceptor` with SMDP telemetry and trajectory buffers. `('latent_action', dict(interceptor = decoder, latent_dim = 4))` |
 | `time` | Supplies the per-episode timestep. `('time', dict(transform = fourier_time))` |
 | `past_action` | Supplies the last action, or the last n with `num_past_actions`. `('past_action', dict(num_past_actions = 2))` |
 | `past_state` | Supplies the last state, or the last n with `num_past_states`. `('past_state', dict(num_past_states = 5))` |

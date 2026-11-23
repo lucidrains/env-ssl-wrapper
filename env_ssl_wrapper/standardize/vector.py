@@ -219,6 +219,7 @@ class MultiprocessingVecEnv:
         num_envs: int = 8,
         seed: int = 0
     ):
+        assert num_envs >= 1, f'num_envs must be at least 1, got {num_envs}'
         self.num_envs = num_envs
 
         if num_envs == 1:
@@ -334,15 +335,7 @@ class MultiprocessingVecEnv:
 
         return stack_trees([obs for obs, _ in results]), merge_infos([info for _, info in results])
 
-    def step(self, actions):
-        actions = tree_map(lambda a: to_numpy(a) if is_tensor(a) else a, actions)
-        actions = split_actions(actions, self.num_envs)
-
-        for conn, action in zip(self._conns, actions):
-            safe_send(conn, ('step', action))
-
-        results = recv_all(self._conns)
-
+    def _pack_step(self, results):
         obs = [result[0] for result in results]
         reward = np.asarray([result[1] for result in results])
         terminated = np.asarray([result[2] for result in results], dtype = bool)
@@ -363,6 +356,19 @@ class MultiprocessingVecEnv:
             info['_final_observation'] = done
 
         return stack_trees(obs), reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        conns = [self._conns[int(i)] for i in indices]
+        actions = tree_map(lambda a: to_numpy(a) if is_tensor(a) else a, actions)
+        actions = split_actions(actions, len(conns))
+
+        for conn, action in zip(conns, actions):
+            safe_send(conn, ('step', action))
+
+        return self._pack_step(recv_all(conns))
+
+    def step(self, actions):
+        return self.step_at(range(self.num_envs), actions)
 
     def close(self):
         shutdown(self._conns, self._procs)

@@ -818,5 +818,168 @@ def test_action_chunk_trace_disabled_by_default():
 
 def test_action_chunk_all_export():
     import env_ssl_wrapper
+    import env_ssl_wrapper.action_chunking as legacy_chunking
+    from env_ssl_wrapper import ActionChunks, make_action_chunks
+
     assert hasattr(env_ssl_wrapper, 'ActionChunkWrapper')
     assert hasattr(env_ssl_wrapper, 'ChunkTrace')
+    assert legacy_chunking.ActionChunks is ActionChunks
+    assert legacy_chunking.make_action_chunks is make_action_chunks
+
+def test_action_chunk_mean_reward_int_tensor():
+    class IntRewardTorchEnv:
+        wp_env = True
+        action_space = DiscreteSpace(2)
+
+        def reset(self, **kwargs):
+            return torch.zeros(2), {}
+
+        def step(self, action):
+            return torch.zeros(2), torch.tensor(1, dtype = torch.long), torch.tensor(False), torch.tensor(False), {}
+
+    env = ActionChunkWrapper(IntRewardTorchEnv(), chunk_len = 2, reward_mode = 'mean')
+    env.reset()
+    _, reward, *_ = env.step(torch.zeros(2, dtype = torch.long))
+    assert reward.dtype == torch.float32 and torch.allclose(reward, torch.tensor(1.0))
+
+# critic-side sliding action chunks
+
+def explicit_chunks(actions, chunk_len, lens = None, pad_value = 0.):
+    time, dim = actions.shape
+    lens = time if lens is None else lens
+    chunks = torch.full((time, chunk_len, dim), pad_value, dtype = actions.dtype)
+    mask = torch.zeros((time, chunk_len), dtype = torch.bool)
+    valid = torch.zeros((time,), dtype = torch.bool)
+
+    for t in range(time):
+        for i in range(chunk_len):
+            if t + i < lens:
+                chunks[t, i] = actions[t + i]
+                mask[t, i] = True
+
+        valid[t] = (t + chunk_len) <= lens
+
+    return rearrange(chunks, 't k d -> t (k d)'), mask, valid
+
+def test_action_chunks_match_explicit_loop():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(4.), 't -> t 1')
+    out = make_action_chunks(actions, chunk_len = 2)
+
+    expected_actions, expected_mask, expected_valid = explicit_chunks(actions, 2)
+
+    assert torch.equal(out.actions, expected_actions)
+    assert torch.equal(out.action_mask, expected_mask)
+    assert torch.equal(out.valid, expected_valid)
+    assert out.chunk_len == 2
+    assert out.action_dim == 1
+    assert out.time == 4
+
+def test_action_chunks_lens_pad_at_episode_end():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(4.), 't -> t 1')
+    out = make_action_chunks(actions, chunk_len = 2, lens = 3)
+
+    assert out.actions.tolist() == [[0., 1.], [1., 2.], [2., 0.], [0., 0.]]
+    assert out.action_mask.tolist() == [[True, True], [True, True], [True, False], [False, False]]
+    assert out.valid.tolist() == [True, True, False, False]
+
+def test_action_chunks_pad_value_and_flatten_false():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(4.), 't -> t 1')
+    out = make_action_chunks(actions, chunk_len = 3, lens = 2, pad_value = -1., flatten = False)
+
+    assert out.actions.shape == (4, 3, 1)
+    assert rearrange(out.actions[0], '... -> (...)').tolist() == [0., 1., -1.]
+    assert rearrange(out.actions[1], '... -> (...)').tolist() == [1., -1., -1.]
+    assert out.action_mask[0].tolist() == [True, True, False]
+    assert out.time == 4
+
+def test_action_chunks_box_action_dim():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(8.), '(t d) -> t d', t = 4)
+    out = make_action_chunks(actions, chunk_len = 2)
+
+    assert out.actions.shape == (4, 4)
+    assert out.actions[0].tolist() == [0., 1., 2., 3.]
+    assert out.actions[1].tolist() == [2., 3., 4., 5.]
+    assert out.actions[2].tolist() == [4., 5., 6., 7.]
+    assert out.actions[3].tolist() == [6., 7., 0., 0.]
+    assert out.action_mask[-1].tolist() == [True, False]
+
+def test_action_chunks_batched_lens():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(8.), '(b t d) -> b t d', b = 2, t = 4, d = 1)
+    out = make_action_chunks(actions, chunk_len = 2, lens = torch.tensor([4, 3]))
+
+    assert out.actions.shape == (2, 4, 2)
+    assert out.action_mask[0].tolist() == [[True, True], [True, True], [True, True], [True, False]]
+    assert out.action_mask[1].tolist() == [[True, True], [True, True], [True, False], [False, False]]
+    assert out.valid[0].tolist() == [True, True, True, False]
+    assert out.valid[1].tolist() == [True, True, False, False]
+
+def test_action_chunks_scalar_lens_broadcast():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(8.), '(b t d) -> b t d', b = 2, t = 4, d = 1)
+    out = make_action_chunks(actions, chunk_len = 2, lens = 3)
+
+    assert out.valid[0].tolist() == [True, True, False, False]
+    assert out.valid[1].tolist() == [True, True, False, False]
+
+def test_action_chunks_chunk_len_exceeds_time():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(3.), 't -> t 1')
+    out = make_action_chunks(actions, chunk_len = 5)
+
+    assert out.actions.shape == (3, 5)
+    assert out.valid.tolist() == [False, False, False]
+    assert out.action_mask[0].tolist() == [True, True, True, False, False]
+
+def test_action_chunks_invalid_inputs():
+    from env_ssl_wrapper import make_action_chunks
+
+    with pytest.raises(AssertionError):
+        make_action_chunks(torch.zeros(4, 1), chunk_len = 0)
+
+    with pytest.raises(AssertionError):
+        make_action_chunks(torch.zeros(4), chunk_len = 2)
+
+def test_action_chunks_do_not_mutate_input():
+    from env_ssl_wrapper import make_action_chunks
+
+    actions = rearrange(torch.arange(4.), 't -> t 1')
+    before = actions.clone()
+
+    make_action_chunks(actions, chunk_len = 2, lens = 2)
+
+    assert torch.equal(actions, before)
+
+def test_action_chunks_from_execution_trace():
+    from env_ssl_wrapper import make_action_chunks
+
+    env = ActionChunkWrapper(gym.make('Pendulum-v1'), chunk_len = 2, trace_steps = True)
+    env.reset(seed = 0)
+
+    actions = []
+
+    for _ in range(2):
+        _, _, _, _, info = env.step(torch.zeros(1, 2, 1))
+        actions.append(torch.as_tensor(info['chunk_trace'].actions))
+
+    actions = torch.cat(actions, dim = 0)
+    chunks = make_action_chunks(actions, chunk_len = 2, lens = len(actions))
+
+    assert actions.shape == (4, 1)
+    assert chunks.actions.shape == (4, 2)
+    assert torch.equal(chunks.actions[0], rearrange(actions[:2], '... -> (...)'))
+    assert chunks.valid.tolist() == [True, True, True, False]
+    assert chunks.action_mask[-1].tolist() == [True, False]
+
+    env.close()

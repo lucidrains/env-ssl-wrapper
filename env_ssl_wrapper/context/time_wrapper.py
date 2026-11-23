@@ -82,6 +82,7 @@ class TimeWrapper(TransformObservationWrapper):
             return None
 
         obs, info = out
+        self.times = self.times.clone()
         self.times[index] = 0
         value = self._slot_value(index)
 
@@ -105,7 +106,8 @@ class TimeWrapper(TransformObservationWrapper):
         obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action))
         done = dones_of(terminated, truncated)
 
-        self.times += 1
+        # allocate a fresh tensor so previously returned obs['time'] views are never mutated in place
+        self.times = self.times + 1
 
         # terminal observations carry the ended episode's timestep
 
@@ -114,6 +116,6 @@ class TimeWrapper(TransformObservationWrapper):
         out = self.transform_obs(obs, done = done)
 
         if self.autoresets:
-            self.times[done_mask(done, self.num_envs, device = self.times.device)] = 0
+            self.times = self.times.masked_fill(done_mask(done, self.num_envs, device = self.times.device), 0)
 
         return out, reward, terminated, truncated, info

@@ -196,3 +196,13 @@ def test_legacy_seeding_module_and_dunder_all():
     assert 'ActionChunks' in env_ssl_wrapper.__all__
     assert 'make_action_chunks' in env_ssl_wrapper.__all__
     assert 'SGSWrapper' in env_ssl_wrapper.__all__
+
+def test_version_matches_pyproject():
+    from pathlib import Path
+    import re
+    import env_ssl_wrapper
+
+    pyproject = (Path(__file__).resolve().parents[2] / 'pyproject.toml').read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+    assert match is not None
+    assert env_ssl_wrapper.__version__ == match.group(1)

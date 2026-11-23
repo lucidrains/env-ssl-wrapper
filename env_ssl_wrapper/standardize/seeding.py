@@ -198,7 +198,7 @@ def reset_env_at(env, index: int, seed: int | None = None, **kwargs):
 
     envs = get_attr(env, 'envs')
 
-    if isinstance(envs, (list, tuple)) and index < len(envs):
+    if isinstance(envs, (list, tuple)) and 0 <= index < len(envs):
         obs, info = _reset_subenv(envs[index], seed, kwargs)
         masks = get_attr(env, '_autoreset_envs')
 

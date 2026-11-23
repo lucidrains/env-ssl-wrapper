@@ -108,6 +108,7 @@ class PastStatesWrapper(HistoryWrapper):
         slot_state = slot_state if is_tensor(slot_state) else torch.as_tensor(slot_state)
 
         if exists(self.last_state):
+            self.last_state = self.last_state.clone()
             self.last_state[index] = slot_state.to(device = self.last_state.device, dtype = self.last_state.dtype).reshape(self.last_state[index].shape)
 
         self._reset_slot(index)

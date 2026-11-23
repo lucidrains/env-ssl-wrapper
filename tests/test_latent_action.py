@@ -766,3 +766,68 @@ def test_readme_latent_action_snippets():
     _, _, _, _, info = env.step(torch.ones(1, 3))
     assert info['chosen_h'].item() == 4
     env.close()
+
+def test_compose_env_latent_action_and_mp_step_at():
+    from env_ssl_wrapper import compose_env
+
+    decoder = nn.Linear(3, 2)
+    env = compose_env(
+        ContStepEnv(),
+        'auto_batch',
+        ('tensor', dict(device = 'cpu')),
+        ('latent_action', dict(interceptor = decoder, latent_dim = 3)),
+    )
+    obs, _ = env.reset(seed = 0)
+    assert obs.shape == (1, 4)
+    obs, rew, _, _, info = env.step(torch.zeros(1, 3))
+    assert obs.shape == (1, 4) and info['duration'].item() == 1.0
+
+    with MultiprocessingVecEnv(make_disc_env, num_envs = 3, seed = 0) as mp_env:
+        mp_env.reset()
+        obs_sub, rew_sub, term_sub, trunc_sub, _ = mp_env.step_at([0, 2], np.array([1, 2]))
+        assert obs_sub.shape == (2, 3) and rew_sub.shape == (2,)
+        assert term_sub.shape == (2,) and trunc_sub.shape == (2,)
+
+def test_latent_action_reward_mode_recording_stacked_gamma_and_edge_cases():
+    # reward_mode = 'mean' is stored consistently in higher_buffer and paired_buffer
+    bank = ActionBankInterceptor(np.array([[0, 2]], dtype = np.int64))
+    env = LatentActionWrapper(DiscStepEnv(), bank, gamma = 0.9, reward_mode = 'mean')
+    env.reset()
+    _, reward, _, _, info = env.step(0)
+    assert np.isclose(reward, 2.0)
+    assert np.isclose(bank.paired_data().reward.item(), 2.0)
+    assert np.isclose(bank.paired_data().raw_reward.item(), 4.0)
+    assert np.isclose(bank.higher_chunks(1).rewards.item(), 2.0)
+
+    # outer gamma = 1.0 preserves inner layer's discounted reward when stacked
+    l1 = ActionBankInterceptor(np.array([[0, 1]], dtype = np.int64))
+    l2 = ActionBankInterceptor(np.array([[0, 0]], dtype = np.int64))
+    inner = LatentActionWrapper(DiscStepEnv(), l1, gamma = 0.5)
+    outer = LatentActionWrapper(inner, l2, gamma = 1.0)
+    outer.reset()
+    _, rew_outer, _, _, _ = outer.step(0)
+    # each inner step returns 1 + 0.5 * 2 = 2.0; two inner steps with outer gamma = 1.0 -> 4.0
+    assert np.isclose(rew_outer, 4.0)
+
+    # unspecified higher space on discrete inner env still accepts unbatched continuous latent vectors
+    env_unspec = LatentActionWrapper(DiscStepEnv(), lambda z: (z[:, 0] > 0).long())
+    env_unspec.reset()
+    _, _, _, _, info_u = env_unspec.step(np.array([1.0, -1.0, 0.5], dtype = np.float32))
+    assert info_u['duration'] == 1.0
+
+    # mixed float and int banks raise AssertionError instead of silently truncating
+    with pytest.raises(AssertionError):
+        ActionBankInterceptor([np.array([[0, 1]], dtype = np.int64), np.array([[0.5, 0.5]], dtype = np.float32)])
+
+    # ragged / non-numeric inner info fields do not crash stacked info aggregation
+    class RaggedInfoEnv(DiscStepEnv):
+        def step(self, action):
+            obs, r, tm, tr, info = super().step(action)
+            info['ragged'] = [1] * self.t
+            return obs, r, tm, tr, info
+
+    lvl1 = LatentActionWrapper(RaggedInfoEnv(), ActionBankInterceptor(np.array([[0, 1]], dtype = np.int64)), gamma = 0.9)
+    lvl2 = LatentActionWrapper(lvl1, ActionBankInterceptor(np.array([[0, 0]], dtype = np.int64)), gamma = 0.9)
+    lvl2.reset()
+    _, _, _, _, info_rag = lvl2.step(0)
+    assert 'lower_info' in info_rag and 'ragged' not in info_rag['lower_info']

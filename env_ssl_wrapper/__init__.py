@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-__version__ = '0.6.9'
+__version__ = '0.7.0'
 
 import sys as _sys
 
 from . import standardize as _standardize
 from .standardize import *  # noqa: F403
 
+from . import action_chunk as _action_chunk
 from .memory_trace import MemoryTraceWrapper
-from .action_chunk import ActionChunkWrapper, ChunkTrace
-from .action_chunking import ActionChunks, make_action_chunks
+from .action_chunk import ActionChunkWrapper, ChunkTrace, ActionChunks, make_action_chunks
 from .latent_action import (
     LatentActionWrapper,
     ActionInterceptorWrapper,
@@ -126,6 +126,8 @@ __all__ = [
 
 for _name in _LEGACY_MODULES:
     _sys.modules[f'{__name__}.{_name}'] = getattr(_standardize, _name)
+
+_sys.modules[f'{__name__}.action_chunking'] = _action_chunk
 
 def __getattr__(name):
     if hasattr(_standardize, name):

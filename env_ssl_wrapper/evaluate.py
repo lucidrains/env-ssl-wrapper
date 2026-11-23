@@ -13,7 +13,6 @@ from .standardize.spaces import action_space_is_discrete
 from .standardize.seeding import _take_slot, seed_env
 from .standardize.helpers import (
     default,
-    dones_of,
     env_autoresets,
     env_num_envs,
     env_render,
@@ -235,6 +234,9 @@ def capture_frame(env):
     if frame.ndim == 3 and frame.shape[-1] == 4:
         frame = frame[..., :3]
 
+    if frame.size == 0:
+        return None
+
     if frame.dtype != np.uint8:
         scale = 255. if frame.max() <= 1. else 1.
         frame = np.clip(frame * scale, 0., 255.).astype(np.uint8)
@@ -386,6 +388,7 @@ def evaluate_actor(
     # seed fixes the episode seeds, so checkpoints are compared on identical episodes
     # video_path records the first (or best) video_episodes episodes
 
+    assert episodes >= 1, f'episodes must be at least 1, got {episodes}'
     assert video_select in ('first', 'best') or callable(video_select)
 
     policy, module = resolve_actor(actor)
@@ -462,8 +465,8 @@ def evaluate_actor(
             active_t = torch.from_numpy(active)
 
             if collect_trace:
-                obs_np = to_numpy(actor_obs)
-                act_np = to_numpy(unscaled_action)
+                obs_np = tree_map(to_numpy, actor_obs)
+                act_np = tree_map(to_numpy, unscaled_action)
                 rew_flat = reward.reshape(-1)
 
                 for i in np.where(active)[0]:
@@ -479,8 +482,20 @@ def evaluate_actor(
                 if exists(next_goal):
                     current_goal = next_goal
 
+            step_len = None
+            if isinstance(info, dict):
+                if exists(info.get('duration')):
+                    step_len = torch.as_tensor(to_numpy(info['duration']), dtype = torch.float32).reshape(-1)
+                elif exists(info.get('chunk_length')):
+                    step_len = torch.as_tensor(to_numpy(info['chunk_length']), dtype = torch.float32).reshape(-1)
+
+            if not exists(step_len):
+                step_len = torch.ones(num_envs, dtype = torch.float32)
+            elif step_len.numel() == 1 and num_envs > 1:
+                step_len = step_len.expand(num_envs)
+
             returns += torch.where(active_t, reward, 0.)
-            lengths += torch.where(active_t, float(info.get('chunk_length', 1) if isinstance(info, dict) else 1), 0.)
+            lengths += torch.where(active_t, step_len, 0.)
             steps += torch.where(active_t, 1, 0)
 
             term_np = to_numpy(terminated).astype(bool).reshape(-1)
@@ -549,7 +564,7 @@ def evaluate_actor(
                         videos.append(path)
                     elif not select_first:
                         score = ep_return if video_select == 'best' else video_select(ep_data)
-                        accepted_video = exists(score) and score is not False
+                        accepted_video = exists(score) and not (isinstance(score, (bool, np.bool_)) and not bool(score))
                         if accepted_video:
                             video_candidates.append((score, episode, list(frames)))
 

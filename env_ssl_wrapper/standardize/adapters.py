@@ -158,10 +158,10 @@ class WrapperAdapter(BaseEnvAdapter):
         self.inner_adapter.seed(seed)
 
     def render(self, height: int, width: int, camera = None):
-        render = get_attr(self.env, 'render')
-
-        if callable(render):
-            return render_with_dims(render, height, width, camera)
+        # only use the wrapper's own render override — otherwise delegate to the
+        # inner adapter so simulator-specific renderers and render_mode guards run
+        if callable(getattr(type(self.env), 'render', None)):
+            return render_with_dims(self.env.render, height, width, camera)
 
         return self.inner_adapter.render(height, width, camera)
 
