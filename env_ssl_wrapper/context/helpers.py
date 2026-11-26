@@ -253,5 +253,64 @@ class HistoryWrapper(TransformObservationWrapper):
         self.history, self.history_mask = live_history, live_mask
         return obs, reward, terminated, truncated, info
 
+    def _step_at_with_item(self, indices, actions, item_sub):
+        from ..latent_action.helpers import _step_at_env
+
+        idx = torch.as_tensor([int(i) for i in indices], dtype = torch.long)
+        m = len(idx)
+
+        obs, reward, terminated, truncated, info = normalize_step_out(_step_at_env(self.env, indices, actions))
+        done = dones_of(terminated, truncated)
+        fresh = done_mask(done, m, device = 'cpu') & self.autoresets
+
+        item_t = item_sub if is_tensor(item_sub) else (torch.as_tensor(item_sub) if exists(item_sub) else None)
+        mask_dev = self.history_mask.device if exists(self.history_mask) else None
+
+        if exists(item_t):
+            if not exists(self.history):
+                self.history = item_t.new_zeros((self.num_envs, self.history_len, *item_t.shape[1:]))
+            history = self.history.to(device = item_t.device).clone()
+            idx_h = idx.to(history.device)
+            item_r = item_t.reshape(m, *history.shape[2:]).to(dtype = history.dtype)
+            next_sub_hist = torch.cat((history[idx_h, 1:], item_r[:, None]), dim = 1)
+            present = torch.ones(m, dtype = torch.bool, device = mask_dev)
+        else:
+            history = self.history.clone() if exists(self.history) else None
+            idx_h = idx.to(history.device) if exists(history) else idx
+            next_sub_hist = (
+                torch.cat((history[idx_h, 1:], torch.zeros_like(history[idx_h, -1:])), dim = 1)
+                if exists(history) else None
+            )
+            present = torch.zeros(m, dtype = torch.bool, device = mask_dev)
+
+        history_mask = (
+            self.history_mask.clone()
+            if exists(self.history_mask)
+            else torch.zeros(self.num_envs, self.history_len, dtype = torch.bool, device = mask_dev)
+        )
+        idx_m = idx.to(history_mask.device)
+        next_sub_mask = torch.cat((history_mask[idx_m, 1:], present[:, None]), dim = 1)
+
+        maybe_transform_final_observation(
+            info,
+            lambda final_obs: self._attach(final_obs, *self._format_history(next_sub_hist, next_sub_mask)),
+        )
+
+        live_sub_hist, live_sub_mask = next_sub_hist, next_sub_mask
+
+        if self.autoresets and fresh.any():
+            if exists(next_sub_hist):
+                fresh_ = fresh.to(device = next_sub_hist.device).reshape(-1, *((1,) * (next_sub_hist.ndim - 1)))
+                live_sub_hist = torch.where(fresh_, torch.zeros_like(next_sub_hist), next_sub_hist)
+            live_sub_mask = next_sub_mask.clone()
+            live_sub_mask[fresh.to(device = live_sub_mask.device)] = False
+
+        if exists(history) and exists(live_sub_hist):
+            history[idx_h] = live_sub_hist
+        history_mask[idx_m] = live_sub_mask
+
+        self.history, self.history_mask = history, history_mask
+        return obs, reward, terminated, truncated, info, live_sub_hist, live_sub_mask
+
     def transform_obs(self, obs, done = None):
         return self._attach(obs, *self._format_history(self.history, self.history_mask))

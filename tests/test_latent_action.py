@@ -16,6 +16,7 @@ from env_ssl_wrapper import (
     LatentActionWrapper,
     MultiprocessingVecEnv,
     PastActionsWrapper,
+    PolicyInterceptor,
     StandardizeEnvWrapper,
     StepTranslation,
     Translation,
@@ -831,3 +832,496 @@ def test_latent_action_reward_mode_recording_stacked_gamma_and_edge_cases():
     lvl2.reset()
     _, _, _, _, info_rag = lvl2.step(0)
     assert 'lower_info' in info_rag and 'ragged' not in info_rag['lower_info']
+
+# stateful lifecycle, PolicyInterceptor, substep video recording & StandardizeEnvWrapper
+
+def test_reset_state_lifecycle_and_env_ids_on_staggered_termination():
+    reset_log = []
+    step_env_ids_log = []
+
+    class TrackingStatefulInterceptor(ActionInterceptor):
+        def __init__(self):
+            super().__init__(latent_dim = 2, horizon = 4, record = False)
+
+        def reset_state(self, env_ids = None):
+            reset_log.append(None if env_ids is None else list(env_ids))
+
+        def step_lower(self, action, obs, step = 0, env_ids = None):
+            step_env_ids_log.append((step, list(env_ids)))
+            return StepTranslation(action = action)
+
+    envs = [ContStepEnv(terminate_at = 2 if i == 0 else 10) for i in range(3)]
+    env = LatentActionWrapper(envs, TrackingStatefulInterceptor(), eval_mode = True, gamma = 0.99)
+
+    env.reset(seed = 0)
+    assert reset_log == [None]  # called even with eval_mode=True and record=False
+
+    _, _, term, _, info = env.step(torch.zeros(3, 2))
+    assert term.tolist() == [True, False, False]
+    assert info['executed_steps'].tolist() == [2, 4, 4]
+    # slot 0 terminated at substep k=1 -> reset_state([0]) fires and substeps k=2,3 only pass env_ids [1, 2]
+    assert reset_log == [None, [0]]
+    assert step_env_ids_log == [(0, [0, 1, 2]), (1, [0, 1, 2]), (2, [1, 2]), (3, [1, 2])]
+
+    env.reset_at(2, seed = 5)
+    assert reset_log == [None, [0], [2]]
+
+def test_policy_interceptor_stateless_transforms_freeze_and_terminate():
+    class LatentMotorPolicy(nn.Module):
+        dim_latent = 3
+        dim_action = 2
+
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(2 + 3, 2, bias = False)
+            with torch.no_grad():
+                self.lin.weight.copy_(torch.tensor([
+                    [0.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0, 0.0],
+                ]))
+
+        def forward(self, obs, latent):
+            return self.lin(torch.cat((obs, latent), dim = -1))
+
+    policy = LatentMotorPolicy()
+    ic = PolicyInterceptor(
+        policy,
+        horizon = 4,
+        obs_fn = slice(0, 2),
+        latent_fn = 'l2',
+        terminate_fn = lambda obs, z, step: torch.full((obs.shape[0],), step >= 2, dtype = torch.bool),
+        freeze = True,
+    )
+
+    assert ic.record_enabled is False
+    assert all(not p.requires_grad for p in policy.parameters())
+    assert not policy.training
+    ic.train(True)
+    assert not policy.training  # frozen policy stays eval
+
+    env = LatentActionWrapper(ContStepEnv(obs_dim = 4, act_dim = 2), ic, gamma = 1.0, trace_steps = True)
+    env.reset(seed = 0)
+    _, _, _, _, info = env.step(np.array([3.0, 4.0, 0.0], dtype = np.float32))
+
+    # l2([3, 4, 0]) = [0.6, 0.8, 0.0]; terminates when step >= 2 (steps 0, 1, 2 -> 3 steps)
+    assert info['executed_steps'] == 3
+    expected = np.array([[0.6, 0.8]] * 3, dtype = np.float32)
+    assert np.allclose(info['latent_trace'].lower_actions, expected, atol = 1e-5)
+
+def test_policy_interceptor_history_windows_and_per_slot_reset():
+    seen_obs_hist = []
+    seen_act_hist = []
+
+    class HistoryAwarePolicy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = nn.Parameter(torch.ones(1))
+
+        def forward(self, obs, latent, past_action = None):
+            seen_obs_hist.append(obs.detach().clone())
+            seen_act_hist.append(past_action.detach().clone())
+            return (latent + 0.1 * obs[:, -1, :2] + 0.0 * past_action[:, -1]) * self.scale
+
+    ic = PolicyInterceptor(
+        HistoryAwarePolicy(),
+        horizon = 3,
+        latent_dim = 2,
+        obs_history_len = 2,
+        action_history_len = 1,
+        obs_pad_mode = 'replicate',
+        freeze = True,
+    )
+
+    envs = [ContStepEnv(obs_dim = 4, act_dim = 2, terminate_at = 2 if i == 0 else 20) for i in range(2)]
+    env = LatentActionWrapper(envs, ic, gamma = 0.99)
+    env.reset(seed = 0)
+
+    # macro step 1: slot 0 terminates at k=1 (2 steps) and autoresets; slot 1 runs all 3 steps
+    env.step(torch.tensor([[0.5, -0.5], [0.2, 0.2]]))
+    assert seen_obs_hist[0].shape == (2, 2, 4)
+    assert torch.allclose(seen_obs_hist[0][:, 0], seen_obs_hist[0][:, 1])  # replicate pad on first frame
+    assert torch.allclose(seen_act_hist[0], torch.zeros(2, 1, 2))         # zero past_action on first frame
+    assert not torch.allclose(seen_act_hist[1], torch.zeros(2, 1, 2))     # non-zero past_action on k=1
+
+    # macro step 2: slot 0 must have fresh replicated obs + zero past_action, while slot 1 carries history!
+    seen_obs_hist.clear()
+    seen_act_hist.clear()
+    env.step(torch.tensor([[0.1, 0.1], [0.2, 0.2]]))
+    assert torch.allclose(seen_obs_hist[0][0, 0], seen_obs_hist[0][0, 1])     # slot 0 reset -> replicated
+    assert torch.allclose(seen_act_hist[0][0], torch.zeros(1, 2))             # slot 0 reset -> zero past_act
+    assert not torch.allclose(seen_obs_hist[0][1, 0], seen_obs_hist[0][1, 1]) # slot 1 continuous history
+    assert not torch.allclose(seen_act_hist[0][1], torch.zeros(1, 2))         # slot 1 continuous past_act
+
+def test_policy_interceptor_custom_recurrent_state_and_standardize_wrapper():
+    class TinyRNNPolicy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = nn.GRUCell(4 + 2, 8)
+            self.head = nn.Linear(8, 2)
+
+        def forward(self, obs, z, h):
+            h_next = self.cell(torch.cat((obs, z), dim = -1), h)
+            return self.head(h_next).tanh(), h_next
+
+    def init_state(n, dev):
+        return torch.zeros(n, 8, device = dev)
+
+    def reset_state(h, ids):
+        if ids is None:
+            return torch.zeros_like(h)
+        h = h.clone()
+        h[torch.as_tensor(ids, device = h.device, dtype = torch.long)] = 0.
+        return h
+
+    def step_fn(pol, obs, z, h, *, step, env_ids):
+        ids = env_ids.to(h.device)
+        act, h_sub = pol(obs, z, h[ids])
+        h_next = h.clone()
+        h_next[ids] = h_sub
+        return act, h_next
+
+    ic = PolicyInterceptor(
+        TinyRNNPolicy(),
+        horizon = 3,
+        latent_dim = 2,
+        init_state_fn = init_state,
+        reset_state_fn = reset_state,
+        step_fn = step_fn,
+    )
+
+    env = StandardizeEnvWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2, terminate_at = 5 if i == 0 else 15) for i in range(2)],
+        interceptor = ic,
+        latent_action_kwargs = dict(gamma = 0.99, clip_lower_actions = True),
+    )
+    obs, _ = env.reset(seed = 0)
+    assert torch.is_tensor(obs) and obs.shape == (2, 4)
+
+    obs, rew, term, trunc, info = env.step(torch.zeros(2, 2))
+    assert obs.shape == (2, 4) and rew.shape == (2,)
+    assert info['executed_steps'].tolist() == [3, 3]
+
+    _, _, term2, _, info2 = env.step(torch.zeros(2, 2))
+    assert term2.tolist() == [True, False]
+    assert info2['executed_steps'].tolist() == [2, 3]
+    # slot 0 reset -> hidden state zeroed, slot 1 still non-zero
+    assert torch.allclose(ic._custom_state[0], torch.zeros(8))
+    assert ic._custom_state[1].abs().sum().item() > 0.
+
+def test_evaluate_actor_captures_all_substep_frames_and_compose_step_at(tmp_path):
+    from env_ssl_wrapper import compose_env
+
+    ep_frames_seen = []
+    base = StandardizeEnvWrapper(ContStepEnv(terminate_at = 6, render_mode = 'rgb_array'))
+    ic = PolicyInterceptor(lambda obs, z: z, horizon = 3, latent_dim = 2)
+    wrapped = LatentActionWrapper(base, ic, gamma = 1.0, eval_mode = True, record_frames = True)
+
+    vid_file = tmp_path / 'substep_smooth.mp4'
+    stats = evaluate_actor(
+        lambda obs: torch.zeros((obs.shape[0], 2)),
+        wrapped,
+        episodes = 1,
+        seed = 0,
+        video_path = str(vid_file),
+        video_episodes = 1,
+        on_episode = lambda d: ep_frames_seen.append(len(d['frames'])),
+    )
+
+    assert stats.lengths.item() == 6.0
+    # 1 initial frame + 6 physics substeps across 2 macro steps (no dropped substeps!)
+    assert ep_frames_seen == [7]
+    assert vid_file.exists()
+
+    # compose_env with TensorWrapper + LatentActionWrapper supports per-slot variable horizons
+    sync_raw = SyncVectorEnv([make_disc_env for _ in range(3)], autoreset_mode = AutoresetMode.SAME_STEP)
+    router = ActionBankInterceptor({1: np.array([[0]]), 3: np.array([[1, 2, 3]])})
+    composed = compose_env(sync_raw, ('tensor', dict(device = 'cpu')), ('latent_action', dict(interceptor = router, gamma = 0.9)), pad_episodes = False)
+    composed.reset(seed = 0)
+    _, _, _, _, info_c = composed.step(torch.tensor([0, 1, 0]))
+    assert info_c['duration'].tolist() == [1.0, 3.0, 1.0]
+    composed.close()
+
+def test_latent_action_wrapper_direct_policy_kwargs_and_abort_fn():
+    class LowLevelMotorPolicy(nn.Module):
+        dim_latent = 2
+        dim_action = 2
+
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Linear(2 * 2 + 2 + 2, 2, bias = False)
+            with torch.no_grad():
+                self.net.weight.zero_()
+                self.net.weight[:, -2:] = torch.eye(2)
+
+        def forward(self, obs, latent, past_action = None):
+            flat = torch.cat((obs.reshape(obs.shape[0], -1), past_action.reshape(obs.shape[0], -1), latent), dim = -1)
+            return self.net(flat)
+
+    abort_env_ids = []
+
+    def abort_on_threshold(obs, z, step, env_ids):
+        abort_env_ids.append((step, list(env_ids)))
+        return obs[:, 0] > 0.75
+
+    # pass trained policy directly to LatentActionWrapper (auto-constructs PolicyInterceptor)
+    env = LatentActionWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(2)],
+        LowLevelMotorPolicy(),
+        horizon = 5,
+        obs_fn = slice(0, 2),
+        obs_history_len = 2,
+        action_history_len = 1,
+        abort_fn = abort_on_threshold,
+        freeze = True,
+        gamma = 0.99,
+        clip_lower_actions = True,
+    )
+    assert isinstance(env.interceptor, PolicyInterceptor)
+    assert env.interceptor.has_abort is True
+    assert env.action_space.shape == (2,)
+
+    env.reset(seed = 0)
+    # slot 0 moves +0.5/step -> obs[0] exceeds 0.75 after 2 steps and aborts BEFORE step k=2!
+    # slot 1 moves +0.1/step -> runs all 5 steps without aborting
+    _, _, _, _, info = env.step(torch.tensor([[0.5, 0.0], [0.1, 0.0]]))
+    assert info['executed_steps'].tolist() == [2, 5]
+    assert info['aborted'].tolist() == [True, False]
+    assert abort_env_ids[0] == (1, [0, 1])
+    assert abort_env_ids[1] == (2, [0, 1])
+    assert abort_env_ids[2] == (3, [1])
+
+    # distribution-returning policy unwraps automatically without custom action_fn
+    dist_env = LatentActionWrapper(
+        ContStepEnv(obs_dim = 4, act_dim = 2),
+        lambda obs, z: torch.distributions.Normal(z, torch.full_like(z, 0.01)),
+        horizon = 3,
+        latent_dim = 2,
+        eval_mode = True,
+    )
+    dist_env.reset(seed = 0)
+    _, _, _, _, d_info = dist_env.step(np.array([0.25, -0.25], dtype = np.float32))
+    assert d_info['executed_steps'] == 3
+
+def test_standardize_env_list_without_interceptor_and_uniform_smdp_info_tensors():
+    # bare list of envs works uniformly in StandardizeEnvWrapper even without an interceptor
+    env_list = StandardizeEnvWrapper([ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(3)], device = 'cpu')
+    obs, _ = env_list.reset(seed = 0)
+    assert torch.is_tensor(obs) and obs.shape == (3, 4)
+    obs, rew, term, trunc, _ = env_list.step(torch.zeros(3, 2))
+    assert obs.shape == (3, 4) and rew.shape == (3,)
+
+    # wrapping a StandardizeEnvWrapper(vec_env) inside an outer LatentActionWrapper preserves per-slot step_at
+    outer = LatentActionWrapper(
+        env_list,
+        lambda obs, z: z,
+        horizon = 4,
+        latent_dim = 2,
+        terminate_fn = lambda obs, z, step: obs[:, 0] > 0.35,
+    )
+    assert outer._can_step_subset is True
+    outer.reset(seed = 0)
+    _, _, _, _, o_info = outer.step(torch.tensor([[0.5, 0.0], [0.2, 0.0], [0.05, 0.0]]))
+    assert o_info['executed_steps'].tolist() == [2, 3, 4]
+    outer.close()
+
+    # SMDP info tensors share identical shape/dtype contract across single and vectorized envs
+    single = StandardizeEnvWrapper(
+        ContStepEnv(obs_dim = 4, act_dim = 2),
+        interceptor = lambda obs, z: z,
+        latent_action_kwargs = dict(horizon = 3, latent_dim = 2, gamma = 0.9),
+        device = 'cpu',
+    )
+    single.reset(seed = 0)
+    _, _, _, _, s_info = single.step(torch.zeros(1, 2))
+    assert torch.is_tensor(s_info['duration']) and s_info['duration'].shape == (1,) and s_info['duration'].dtype == torch.float32
+    assert torch.is_tensor(s_info['discount']) and s_info['discount'].shape == (1,) and torch.isclose(s_info['discount'], torch.tensor([0.9 ** 3]))
+    assert torch.is_tensor(s_info['executed_steps']) and s_info['executed_steps'].shape == (1,) and s_info['executed_steps'].dtype == torch.long
+    assert torch.is_tensor(s_info['aborted']) and s_info['aborted'].shape == (1,) and s_info['aborted'].dtype == torch.bool
+    single.close()
+
+    vec = StandardizeEnvWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(3)],
+        interceptor = lambda obs, z: z,
+        latent_action_kwargs = dict(horizon = 3, latent_dim = 2, gamma = 0.9),
+        device = 'cpu',
+    )
+    vec.reset(seed = 0)
+    _, _, _, _, v_info = vec.step(torch.zeros(3, 2))
+    assert torch.is_tensor(v_info['duration']) and v_info['duration'].shape == (3,) and v_info['duration'].dtype == torch.float32
+    assert torch.is_tensor(v_info['executed_steps']) and v_info['executed_steps'].shape == (3,) and v_info['executed_steps'].dtype == torch.long
+    assert torch.is_tensor(v_info['aborted']) and v_info['aborted'].shape == (3,) and v_info['aborted'].dtype == torch.bool
+    vec.close()
+
+def test_policy_interceptor_wrapper_managed_context_and_higher_obs_isolation():
+    from env_ssl_wrapper.context import PastActionsWrapper, fourier_time
+
+    seen = []
+
+    class RichContextPolicy(nn.Module):
+        dim_latent = 2
+        dim_action = 2
+
+        def forward(self, obs, past_state, past_action, act_mask, time, trace, latent):
+            seen.append(dict(
+                obs = tuple(obs.shape),
+                past_state = tuple(past_state.shape),
+                past_action = tuple(past_action.shape),
+                act_mask = tuple(act_mask.shape),
+                time = tuple(time.shape),
+                trace = tuple(trace.shape),
+                latent = tuple(latent.shape),
+            ))
+            return latent
+
+    env = LatentActionWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(3)],
+        RichContextPolicy(),
+        horizon = 4,
+        lower_wrappers = (
+            ('past_states', dict(num_past_states = (1, 2))),
+            ('past_actions', dict(num_past_actions = (1, 2, 4), has_past_actions_key = 'act_mask')),
+            ('time', dict(transform = fourier_time)),
+            ('memory_trace', dict(lambdas = 0.9)),
+        ),
+        higher_obs_fn = 'obs',
+        terminate_fn = lambda obs, z, step: obs['obs'][:, 0] > 0.35,
+    )
+    assert env._can_step_subset is True
+
+    # stack an outer PastActionsWrapper on top for past *latents* without colliding with inner primitive past_action
+    hl_env = PastActionsWrapper(env, num_past_actions = 2, key = 'past_latent')
+    obs, _ = hl_env.reset(seed = 0)
+    assert set(obs.keys()) == {'obs', 'past_latent'}
+    assert obs['obs'].shape == (3, 4)
+    assert obs['past_latent'].shape == (3, 2, 2)
+
+    z = torch.tensor([[0.5, 0.0], [0.2, 0.0], [0.05, 0.0]])
+    obs, _, _, _, info = hl_env.step(z)
+    # heterogeneous per-slot execution through all 4 lower context wrappers!
+    assert info['executed_steps'].tolist() == [2, 3, 4]
+    assert obs['obs'].shape == (3, 4)
+    assert torch.allclose(obs['past_latent'][:, -1], z)
+
+    # k=0 ran batch=3, k=2 ran batch=2 (slot 0 finished), k=3 ran batch=1 (only slot 2 active)
+    assert seen[0] == dict(
+        obs = (3, 4),
+        past_state = (3, 2, 4),
+        past_action = (3, 3, 2),
+        act_mask = (3, 3),
+        time = (3, 8),
+        trace = (3, 4),
+        latent = (3, 2),
+    )
+    assert seen[-1]['obs'] == (1, 4)
+    assert seen[-1]['past_action'] == (1, 3, 2)
+    hl_env.close()
+
+def test_policy_interceptor_external_inputs_kwargs_dict_context_and_override():
+    captured = []
+
+    class MultiInputPolicy(nn.Module):
+        dim_latent = 2
+        dim_action = 2
+
+        def forward(self, obs, latent, goal, past_action, scale = 1.0):
+            captured.append((obs.shape[0], goal.clone(), past_action.clone(), scale))
+            return (latent + goal[:, :2] + 0.1 * past_action[:, -1]) * scale
+
+    # mix wrapper-managed past_action with externally passed goal / scale / overrides
+    env = StandardizeEnvWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(3)],
+        interceptor = MultiInputPolicy(),
+        latent_action_kwargs = dict(
+            horizon = 4,
+            lower_wrappers = (('past_actions', dict(num_past_actions = (1, 2))),),
+            higher_obs_fn = 'obs',
+            abort_fn = lambda obs, z, step, goal: obs['obs'][:, 0] > goal[:, 2],
+        ),
+        device = 'cpu',
+    )
+    env.reset(seed = 0)
+
+    # 1. per-step kwargs through StandardizeEnvWrapper (auto-sliced across heterogeneous aborts!)
+    z = torch.tensor([[0.4, 0.0], [0.4, 0.0], [0.4, 0.0]])
+    goal = torch.tensor([[0.4, 0.0, 0.3], [0.4, 0.0, 0.7], [0.4, 0.0, 10.0]])
+    obs, _, _, _, info = env.step(z, goal = goal, scale = 0.5)
+    assert obs.shape == (3, 4)
+    # slot 0 aborts at k=1, slot 1 at k=2, slot 2 runs all 4 steps -> goal sliced 3 -> 2 -> 1!
+    assert info['aborted'].tolist() == [True, True, False]
+    assert info['executed_steps'].tolist() == [1, 2, 4]
+    assert [c[0] for c in captured] == [3, 2, 1, 1]
+    assert torch.allclose(captured[-1][1], goal[2:3])
+    assert captured[0][3] == 0.5
+
+    # 2. per-step external kwarg overrides wrapper-managed past_action
+    captured.clear()
+    forced_past = torch.full((3, 2, 2), 7.0)
+    env.step(torch.zeros(3, 2), goal = torch.full((3, 3), 100.0), past_action = forced_past)
+    assert torch.allclose(captured[0][2], forced_past)
+
+    # 3. dict-action passing works with single-arg step(action) loops
+    captured.clear()
+    dict_goal = torch.full((3, 3), 100.0)
+    env.step(dict(latent = torch.zeros(3, 2), goal = dict_goal, past_action = forced_past))
+    assert torch.allclose(captured[0][1], dict_goal)
+    assert torch.allclose(captured[0][2], forced_past)
+
+    # 4. persistent set_context (broadcasts (1, 3) across all slots) + clear_context
+    captured.clear()
+    shared_goal = torch.tensor([[0.1, 0.0, 100.0]])
+    env.set_context(goal = shared_goal)
+    env.step(torch.zeros(3, 2))
+    assert captured[0][1].shape == (3, 3) and torch.allclose(captured[0][1], shared_goal.expand(3, 3))
+
+    # per-step kwarg overrides persistent set_context
+    captured.clear()
+    override_goal = torch.tensor([[0.2, 0.0, 100.0]]).expand(3, 3).clone()
+    env.step(torch.zeros(3, 2), goal = override_goal)
+    assert torch.allclose(captured[0][1], override_goal)
+
+    env.clear_context()
+    env.close()
+
+def test_policy_interceptor_declarative_inputs_and_input_fn():
+    # declarative dict `inputs` with slices, key remapping, and derived callable
+    class CustomArgPolicy(nn.Module):
+        dim_latent = 2
+        dim_action = 2
+
+        def forward(self, pos, cmd, speed):
+            return cmd + 0.0 * pos + 0.0 * speed
+
+    env = LatentActionWrapper(
+        [ContStepEnv(obs_dim = 4, act_dim = 2) for _ in range(2)],
+        CustomArgPolicy(),
+        horizon = 3,
+        inputs = dict(
+            pos = slice(0, 2),
+            cmd = 'latent',
+            speed = lambda ctx: ctx['obs'][:, 2:4].norm(dim = -1, keepdim = True),
+        ),
+    )
+    env.reset(seed = 0)
+    _, _, _, _, info = env.step(torch.tensor([[0.2, -0.1], [0.1, 0.3]]))
+    assert info['executed_steps'].tolist() == [3, 3]
+    env.close()
+
+    # full escape hatch `input_fn(ctx)` returning positional tuple + external kwarg
+    seen_custom = []
+
+    def raw_policy(feat, tag):
+        seen_custom.append((tuple(feat.shape), tag))
+        return feat[:, :2]
+
+    env2 = LatentActionWrapper(
+        ContStepEnv(obs_dim = 4, act_dim = 2),
+        raw_policy,
+        horizon = 2,
+        latent_dim = 2,
+        input_fn = lambda ctx: (torch.cat((ctx['obs'], ctx['latent'], ctx['extra']), dim = -1), ctx['tag']),
+    )
+    env2.reset(seed = 0)
+    _, _, _, _, info2 = env2.step(np.array([0.1, 0.2], dtype = np.float32), extra = torch.ones(3), tag = 'custom')
+    assert info2['executed_steps'] == 2
+    assert seen_custom == [((1, 9), 'custom'), ((1, 9), 'custom')]
+    env2.close()

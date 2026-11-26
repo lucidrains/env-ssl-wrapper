@@ -124,3 +124,20 @@ class PastStatesWrapper(HistoryWrapper):
 
         out = self._attach(obs, *self._format_history(self.history, self.history_mask))
         return out, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        idx = torch.as_tensor([int(i) for i in indices], dtype = torch.long)
+        prev_sub = self.last_state[idx.to(self.last_state.device)] if exists(self.last_state) else None
+
+        obs, reward, terminated, truncated, info, sub_hist, sub_mask = self._step_at_with_item(indices, actions, prev_sub)
+
+        cur_sub = extract_state(obs, self.obs_key)
+        cur_sub = cur_sub if is_tensor(cur_sub) else torch.as_tensor(cur_sub)
+        if exists(self.last_state):
+            self.last_state = self.last_state.clone()
+            self.last_state[idx.to(self.last_state.device)] = cur_sub.to(
+                device = self.last_state.device, dtype = self.last_state.dtype
+            ).reshape(len(idx), *self.last_state.shape[1:])
+
+        out = self._attach(obs, *self._format_history(sub_hist, sub_mask))
+        return out, reward, terminated, truncated, info

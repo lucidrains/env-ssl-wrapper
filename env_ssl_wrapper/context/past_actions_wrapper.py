@@ -107,3 +107,8 @@ class PastActionsWrapper(HistoryWrapper):
         obs, reward, terminated, truncated, info = self._step_with_item(action, self._batch_item(action))
         out = self._attach(obs, *self._format_history(self.history, self.history_mask))
         return out, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        obs, reward, terminated, truncated, info, sub_hist, sub_mask = self._step_at_with_item(indices, actions, actions)
+        out = self._attach(obs, *self._format_history(sub_hist, sub_mask))
+        return out, reward, terminated, truncated, info

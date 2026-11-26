@@ -91,12 +91,12 @@ class DoneTrackerWrapper(EnvWrapper):
         self.reset_done([index])
         return out
 
-    def step(self, action):
+    def step(self, action, **kwargs):
         assert not self.needs_reset, 'environment needs reset before calling step. call env.reset() first'
 
         active_before = self.active_mask
 
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = self.env.step(action, **kwargs) if kwargs else self.env.step(action)
 
         dones = dones_of(terminated, truncated)
         dones_np = to_numpy(dones).astype(bool)
@@ -108,6 +108,32 @@ class DoneTrackerWrapper(EnvWrapper):
 
         if isinstance(info, dict):
             info['episode_lengths'] = self.episode_lengths.copy()
+
+            if self.all_done:
+                info.update(needs_reset = self.needs_reset, all_done = True)
+
+        return obs, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+
+        assert not self.needs_reset, 'environment needs reset before calling step. call env.reset() first'
+
+        idx = np.asarray(indices, dtype = int)
+        active_sub = self.active_mask[idx]
+
+        obs, reward, terminated, truncated, info = _step_at_env(self.env, indices, actions)
+
+        dones = dones_of(terminated, truncated)
+        dones_np = to_numpy(dones).astype(bool)
+        if dones_np.ndim > 1:
+            dones_np = dones_np.any(axis = tuple(range(1, dones_np.ndim)))
+
+        self.episode_lengths[idx[active_sub]] += 1
+        self.is_done[idx] |= dones_np
+
+        if isinstance(info, dict):
+            info['episode_lengths'] = self.episode_lengths[idx].copy()
 
             if self.all_done:
                 info.update(needs_reset = self.needs_reset, all_done = True)

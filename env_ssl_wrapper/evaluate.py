@@ -432,7 +432,9 @@ def evaluate_actor(
         stop_early = False
 
         while len(done_returns) < episodes and not stop_early:
-            if record and (not select_first or len(done_returns) < video_episodes):
+            want_video = record and (not select_first or len(done_returns) < video_episodes)
+
+            if want_video and not frames:
                 frame = capture_frame(env)
                 if exists(frame):
                     frames.append(frame)
@@ -450,6 +452,15 @@ def evaluate_actor(
             action = to_env_action(env, raw_action)
 
             obs, reward, terminated, truncated, info = normalize_step_out(env.step(action))
+
+            if want_video:
+                sub_frames = info.get('substep_frames') if isinstance(info, dict) else None
+                if exists(sub_frames) and len(sub_frames) > 0:
+                    frames.extend(sub_frames)
+                else:
+                    frame = capture_frame(env)
+                    if exists(frame):
+                        frames.append(frame)
 
             # reward chunks collapse to one scalar per env
 
@@ -523,11 +534,6 @@ def evaluate_actor(
 
                 if verbose:
                     print(f'episode {episode:3d} | return {ep_return:8.1f} | length {ep_length:7.0f}', flush = True)
-
-                if record and (not select_first or episode < video_episodes):
-                    frame = capture_frame(env)
-                    if exists(frame):
-                        frames.append(frame)
 
                 ep_data = dict(
                     episode = episode,

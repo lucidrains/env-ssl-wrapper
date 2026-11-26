@@ -10,6 +10,9 @@ from torch.utils._pytree import tree_map
 from .helpers import (
     EnvWrapper,
     FINAL_OBSERVATION_MASK_KEYS,
+    SMDP_BOOL_INFO_KEYS,
+    SMDP_FLOAT_INFO_KEYS,
+    SMDP_INT_INFO_KEYS,
     exists,
     get_adapter,
     is_foreign_array,
@@ -108,6 +111,26 @@ class TensorWrapper(EnvWrapper):
 
         self.cast = partial(numpy_to_torch, device = self.device, cast_obs_to_float = self.cast_obs_to_float)
 
+    def cast_smdp_info(self, info):
+        if not isinstance(info, dict) or 'duration' not in info:
+            return
+
+        for key in SMDP_FLOAT_INFO_KEYS:
+            if key in info:
+                info[key] = self.to_contract(info[key], to_float = True)
+
+        for key in SMDP_INT_INFO_KEYS:
+            if key in info:
+                t = to_torch_leaf(info[key], self.device, cast_obs_to_float = False)
+                info[key] = t if (is_tensor(t) and t.dtype == torch.long) else (t.long() if is_tensor(t) else t)
+
+        for key in SMDP_BOOL_INFO_KEYS:
+            if key in info:
+                info[key] = self.to_contract(info[key], to_float = False)
+
+        if isinstance(info.get('lower_info'), dict):
+            self.cast_smdp_info(info['lower_info'])
+
     def cast_info(self, info):
         if not isinstance(info, dict) or not info:
             return
@@ -117,6 +140,8 @@ class TensorWrapper(EnvWrapper):
         for key in FINAL_OBSERVATION_MASK_KEYS:
             if key in info:
                 info[key] = contract(self.cast(info[key]))
+
+        self.cast_smdp_info(info)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -150,17 +175,16 @@ class TensorWrapper(EnvWrapper):
 
         return tree_map(convert, t)
 
-    def step(self, action):
-        if self.convert_in:
-            if not self.torch_native:
-                action = torch_to_numpy(action)
-            elif is_tensor(action):
-                action = action.to(self.device)
-            else:
-                action = numpy_to_torch(action, device = self.device, cast_obs_to_float = False)
+    def _convert_action_in(self, action):
+        if not self.convert_in:
+            return action
+        if not self.torch_native:
+            return torch_to_numpy(action)
+        if is_tensor(action):
+            return action.to(self.device)
+        return numpy_to_torch(action, device = self.device, cast_obs_to_float = False)
 
-        obs, reward, terminated, truncated, info = self.env.step(action)
-
+    def _convert_step_out(self, obs, reward, terminated, truncated, info):
         if not self.convert_out:
             return obs, reward, terminated, truncated, info
 
@@ -171,3 +195,14 @@ class TensorWrapper(EnvWrapper):
         self.cast_info(info)
 
         return obs, reward, terminated, truncated, info
+
+    def step(self, action, **kwargs):
+        action = self._convert_action_in(action)
+        out = self.env.step(action, **kwargs) if kwargs else self.env.step(action)
+        return self._convert_step_out(*out)
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+
+        actions = self._convert_action_in(actions)
+        return self._convert_step_out(*_step_at_env(self.env, indices, actions))

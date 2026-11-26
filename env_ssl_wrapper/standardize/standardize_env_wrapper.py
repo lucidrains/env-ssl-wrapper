@@ -28,10 +28,18 @@ class StandardizeEnvWrapper(EnvWrapper):
         chunk_gamma: float = 1.,
         chunk_reward_mode: str = 'sum',
         chunk_trace: bool = False,
+        interceptor = None,
+        latent_action_kwargs: dict | None = None,
         reset_configs = None,
         sgs_kwargs: dict | None = None,
     ):
-        env = instantiate_env(env)
+        if exists(interceptor):
+            from ..latent_action import LatentActionWrapper
+
+            env = env if isinstance(env, (list, tuple)) else instantiate_env(env)
+            env = LatentActionWrapper(env, interceptor, **(latent_action_kwargs or {}))
+        else:
+            env = instantiate_env(env)
         wrappers = []
 
         if exists(image_size):
@@ -82,8 +90,13 @@ class StandardizeEnvWrapper(EnvWrapper):
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
-    def step(self, action):
-        return self.env.step(action)
+    def step(self, action, **kwargs):
+        return self.env.step(action, **kwargs) if kwargs else self.env.step(action)
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+
+        return _step_at_env(self.env, indices, actions)
 
 # aliases
 

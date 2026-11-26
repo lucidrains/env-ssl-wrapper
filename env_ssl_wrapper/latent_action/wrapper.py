@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -56,7 +57,7 @@ from .helpers import (
     tree_first_device,
     write_batch_indices,
 )
-from .interceptor import ActionInterceptor, StepTranslation, Translation
+from .interceptor import ActionInterceptor, PolicyInterceptor, StepTranslation, Translation, _normalize_obs_fn
 
 # trace
 
@@ -101,6 +102,28 @@ class LatentActionWrapper(EnvWrapper):
         latent_dim: int | Sequence[int] | None = None,
         num_actions: int | None = None,
         bounds: tuple[float, float] = (-1., 1.),
+        horizon: int | None = None,
+        closed_loop: bool | None = None,
+        obs_fn: Callable | str | slice | Sequence[str] | None = None,
+        latent_fn: Callable | str | None = None,
+        action_fn: Callable | None = None,
+        terminate_fn: Callable | None = None,
+        abort_fn: Callable | None = None,
+        inputs: dict[str, Any] | Sequence[Any] | None = None,
+        input_fn: Callable | None = None,
+        context: dict[str, Any] | None = None,
+        lower_wrappers: Sequence[Any] | None = None,
+        higher_obs_fn: Callable | str | slice | Sequence[str] | None = None,
+        obs_history_len: int = 0,
+        action_history_len: int = 0,
+        obs_pad_mode: str = 'replicate',
+        flatten_history: bool = False,
+        lower_action_dim: int | Sequence[int] | None = None,
+        concat_obs_latent: bool = False,
+        init_state_fn: Callable | None = None,
+        reset_state_fn: Callable | None = None,
+        step_fn: Callable | None = None,
+        freeze: bool | None = None,
         passthrough: bool | None = None,
         gamma: float = 0.99,
         discount: float | None = None,
@@ -116,6 +139,14 @@ class LatentActionWrapper(EnvWrapper):
             assert len(env) > 0, 'env sequence must be non-empty'
             env = _SubEnvList(env, autoreset = autoreset)
 
+        if exists(lower_wrappers):
+            from ..standardize.utils import parse_wrapper
+
+            items = [parse_wrapper(w) for w in lower_wrappers]
+            items.sort(key = lambda item: getattr(item[1], 'priority', 50))
+            for func, _ in items:
+                env = func(env)
+
         super().__init__(env)
 
         gamma = float(default(discount, gamma))
@@ -123,17 +154,72 @@ class LatentActionWrapper(EnvWrapper):
         assert reward_mode in ('sum', 'mean', 'last'), f'unknown reward_mode {reward_mode!r}'
 
         if not isinstance(interceptor, ActionInterceptor):
-            interceptor = ActionInterceptor(
-                interceptor,
-                action_space = action_space,
-                latent_dim = latent_dim,
-                num_actions = num_actions,
-                bounds = bounds,
-                passthrough = bool(passthrough) if exists(passthrough) else False,
-            )
+            has_policy_opts = any((
+                exists(horizon) and int(horizon) > 1,
+                exists(obs_fn),
+                exists(latent_fn),
+                exists(action_fn),
+                exists(terminate_fn),
+                exists(abort_fn),
+                exists(inputs),
+                exists(input_fn),
+                exists(context),
+                obs_history_len > 0,
+                action_history_len > 0,
+                concat_obs_latent,
+                exists(init_state_fn),
+                exists(reset_state_fn),
+                exists(step_fn),
+                exists(freeze),
+            ))
+            use_policy = bool(closed_loop) if exists(closed_loop) else has_policy_opts
+
+            if use_policy:
+                interceptor = PolicyInterceptor(
+                    interceptor,
+                    horizon = default(horizon, 1),
+                    action_space = action_space,
+                    latent_dim = latent_dim,
+                    num_actions = num_actions,
+                    bounds = bounds,
+                    obs_fn = obs_fn,
+                    latent_fn = latent_fn,
+                    action_fn = action_fn,
+                    terminate_fn = terminate_fn,
+                    abort_fn = abort_fn,
+                    inputs = inputs,
+                    input_fn = input_fn,
+                    context = context,
+                    obs_history_len = obs_history_len,
+                    action_history_len = action_history_len,
+                    obs_pad_mode = obs_pad_mode,
+                    flatten_history = flatten_history,
+                    lower_action_dim = lower_action_dim,
+                    concat_obs_latent = concat_obs_latent,
+                    init_state_fn = init_state_fn,
+                    reset_state_fn = reset_state_fn,
+                    step_fn = step_fn,
+                    freeze = True if not exists(freeze) else bool(freeze),
+                    passthrough = bool(passthrough) if exists(passthrough) else False,
+                    record = record,
+                )
+            else:
+                interceptor = ActionInterceptor(
+                    interceptor,
+                    action_space = action_space,
+                    latent_dim = latent_dim,
+                    num_actions = num_actions,
+                    bounds = bounds,
+                    horizon = default(horizon, 1),
+                    passthrough = bool(passthrough) if exists(passthrough) else False,
+                )
         else:
             if exists(passthrough):
                 interceptor.passthrough = bool(passthrough)
+            if exists(horizon):
+                interceptor.horizon = max(1, int(horizon))
+            if exists(context):
+                interceptor.set_context(**context)
             if exists(action_space) or exists(latent_dim) or exists(num_actions):
                 interceptor.action_space = default(
                     resolve_action_space(action_space, latent_dim = latent_dim, num_actions = num_actions, bounds = bounds),
@@ -141,6 +227,9 @@ class LatentActionWrapper(EnvWrapper):
                 )
 
         self.interceptor = interceptor
+        self._abort_takes_env_ids = self._accepts_kwarg(interceptor.should_abort, 'env_ids')
+        self._abort_takes_varkw = self._accepts_varkw(interceptor.should_abort)
+        self.higher_obs_fn = _normalize_obs_fn(higher_obs_fn)
         self.gamma = gamma
         self.reward_mode = reward_mode
         self.eval_mode = bool(eval_mode)
@@ -162,8 +251,13 @@ class LatentActionWrapper(EnvWrapper):
             self.clip_bounds = None
 
         self._latent_action_space = interceptor.action_space
-        self.observation_space = self.inner_observation_space
-        self.single_observation_space = self.inner_observation_space
+        obs_space = self.inner_observation_space
+        if isinstance(higher_obs_fn, str):
+            sp_map = default(get_attr(obs_space, 'spaces'), obs_space)
+            if isinstance(sp_map, dict) and higher_obs_fn in sp_map:
+                obs_space = sp_map[higher_obs_fn]
+        self.observation_space = obs_space
+        self.single_observation_space = obs_space
 
         self.is_vector = is_vectorized(env)
         self.is_auto_batched = truthy_attr(get_attr(env, 'is_auto_batched'))
@@ -174,9 +268,40 @@ class LatentActionWrapper(EnvWrapper):
         self._can_step_subset = (self.num_envs == 1) or can_step_at(env)
         self._inner_is_latent = self._check_inner_latent(env)
 
+        bind_space = getattr(self.interceptor, '_bind_inner_action_space', None)
+        if callable(bind_space):
+            bind_space(self.inner_action_space, num_envs = self.num_envs)
+
         self._batched_obs = None
         self._returns_torch = env_takes_torch(env)
         self._obs_device = torch.device(default(get_attr(env, 'device'), 'cpu'))
+
+    @staticmethod
+    def _accepts_kwarg(fn: Callable, key: str) -> bool:
+        try:
+            params = inspect.signature(fn).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.name == key or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+
+    @staticmethod
+    def _accepts_varkw(fn: Callable) -> bool:
+        try:
+            params = inspect.signature(fn).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+
+    def set_context(self, **kwargs):
+        self.interceptor.set_context(**kwargs)
+        return self
+
+    def clear_context(self, *keys: str):
+        self.interceptor.clear_context(*keys)
+        return self
+
+    def _project_higher_obs(self, obs):
+        return self.higher_obs_fn(obs) if exists(self.higher_obs_fn) else obs
 
     @classmethod
     def _check_inner_latent(cls, env) -> bool:
@@ -214,17 +339,20 @@ class LatentActionWrapper(EnvWrapper):
 
     def reset(self, **kwargs):
         obs, info = normalize_reset_out(self.env.reset(**kwargs))
-        self._returns_torch = tree_any_tensor(obs)
-        self._obs_device = tree_first_device(obs)
+        obs_out = self._project_higher_obs(obs)
+        self._returns_torch = tree_any_tensor(obs_out)
+        self._obs_device = tree_first_device(obs_out)
         self._batched_obs = copy_tree(obs if self.expects_batch else expand_single_tree(obs))
 
         if exists(b := get_batch_size(self._batched_obs)):
             self.num_envs = b
 
+        self.interceptor.reset_state()
+
         if self.should_record:
             self.interceptor.mark_reset()
 
-        return obs, info
+        return obs_out, info
 
     def reset_at(self, index: int, seed = None, **kwargs):
         out = reset_env_at(self.env, index, seed = seed, **kwargs)
@@ -235,10 +363,12 @@ class LatentActionWrapper(EnvWrapper):
         if exists(self._batched_obs):
             self._batched_obs = write_slot_obs(copy_tree(self._batched_obs), obs, int(index))
 
+        self.interceptor.reset_state([int(index)])
+
         if self.should_record:
             self.interceptor.mark_reset([int(index)])
 
-        return obs, info
+        return self._project_higher_obs(obs), info
 
     @classmethod
     def _prep_action_with_space(cls, act, space, batch_size: int, device: torch.device, expects_batch: bool = True):
@@ -406,7 +536,7 @@ class LatentActionWrapper(EnvWrapper):
             return sub.item() if sub.ndim == 0 else sub
         return arr
 
-    def _plan_macro_step(self, start_obs, higher_act_ic, batch_size: int, ic_dev: torch.device, **kwargs):
+    def _plan_macro_step(self, start_obs, higher_act_ic, batch_size: int, ic_dev: torch.device, env_ids: np.ndarray | None = None, **kwargs):
         if self.passthrough:
             act_t = higher_act_ic.long() if self.inner_is_discrete else higher_act_ic.float()
             return rearrange(act_t, 'b ... -> b 1 ...'), ones(batch_size, dtype = torch.long), {}, None, False
@@ -416,9 +546,46 @@ class LatentActionWrapper(EnvWrapper):
             return None, lengths, {}, None, True
 
         start_obs_ic = to_torch_tree(start_obs, ic_dev, float32 = True)
-        raw_trans = call_translator(self.interceptor.translate, higher_act_ic, start_obs_ic, eval_mode = self.eval_mode, **kwargs)
+        raw_trans = call_translator(self.interceptor.translate, higher_act_ic, start_obs_ic, eval_mode = self.eval_mode, env_ids = env_ids, **kwargs)
         lower_actions_ic, lengths_t, ic_info, abort_state = self._normalize_open_loop(raw_trans, batch_size, ic_dev)
         return lower_actions_ic, lengths_t, ic_info, abort_state, False
+
+    @staticmethod
+    def _prep_ext_kwargs(ext_kwargs: dict[str, Any], batch_size: int, device: torch.device, expects_batch: bool) -> dict[str, Any]:
+        if not ext_kwargs:
+            return {}
+
+        def prep_leaf(leaf):
+            if isinstance(leaf, np.ndarray):
+                t = as_tensor(leaf, device = device)
+                if t.is_floating_point() and t.dtype == torch.float64:
+                    t = t.float()
+            elif is_tensor(leaf):
+                t = leaf.detach().to(device)
+            else:
+                return leaf
+
+            if batch_size == 1 and not expects_batch and (t.ndim == 0 or t.shape[0] != 1):
+                return t.unsqueeze(0)
+            if t.ndim >= 1 and t.shape[0] == 1 and batch_size > 1:
+                return t.expand(batch_size, *t.shape[1:])
+            return t
+
+        return {k: tree_map(prep_leaf, v) for k, v in ext_kwargs.items()}
+
+    @staticmethod
+    def _slice_ext_kwargs(prepped: dict[str, Any], act_list: list[int], batch_size: int) -> dict[str, Any]:
+        if not prepped or len(act_list) == batch_size:
+            return prepped
+
+        def slice_leaf(leaf):
+            if is_tensor(leaf) and leaf.ndim >= 1 and leaf.shape[0] == batch_size:
+                return leaf[as_tensor(act_list, device = leaf.device, dtype = torch.long)]
+            if isinstance(leaf, np.ndarray) and leaf.ndim >= 1 and leaf.shape[0] == batch_size:
+                return leaf[act_list]
+            return leaf
+
+        return {k: tree_map(slice_leaf, v) for k, v in prepped.items()}
 
     def _check_abort(
         self,
@@ -433,6 +600,9 @@ class LatentActionWrapper(EnvWrapper):
         higher_act_ic,
         abort_state,
         ic_dev: torch.device,
+        idx: np.ndarray,
+        ext_kwargs: dict[str, Any] | None = None,
+        batch_size: int = 1,
     ):
         act_local = active.nonzero(as_tuple = False).squeeze(-1)
         act_list = act_local.tolist()
@@ -445,16 +615,20 @@ class LatentActionWrapper(EnvWrapper):
         else:
             rem_acts = zeros((len(act_list), rem_max, *self.inner_action_shape), device = ic_dev)
 
-        abort_out = self.interceptor.should_abort(
-            cur_obs_sub,
-            rem_acts,
-            rem_lens.to(ic_dev),
+        abort_kw = dict(
             step = k,
             discounted_reward = disc_rewards[act_local].to(ic_dev),
             discount = discount[act_local].to(ic_dev),
             higher_action = take_batch_indices(higher_act_ic, act_list) if exists(higher_act_ic) else None,
             state = take_batch_indices(abort_state, act_list) if exists(abort_state) else None,
         )
+        if self._abort_takes_env_ids:
+            abort_kw['env_ids'] = idx[act_list]
+        if ext_kwargs and self._abort_takes_varkw:
+            for ek, ev in self._slice_ext_kwargs(ext_kwargs, act_list, batch_size).items():
+                abort_kw.setdefault(ek, ev)
+
+        abort_out = self.interceptor.should_abort(cur_obs_sub, rem_acts, rem_lens.to(ic_dev), **abort_kw)
 
         if not exists(abort_out):
             return
@@ -632,7 +806,16 @@ class LatentActionWrapper(EnvWrapper):
 
         ic_dev = self.interceptor.device
         action_space = self.inner_action_space if is_passthrough else self._latent_action_space
+        sp_tree = default(get_attr(action_space, 'spaces'), action_space)
+
+        ext_kwargs = dict(kwargs)
+        if isinstance(higher_action, dict) and not is_passthrough and not isinstance(sp_tree, dict) and 'latent' in higher_action:
+            dict_extras = {k: v for k, v in higher_action.items() if k != 'latent'}
+            higher_action = higher_action['latent']
+            ext_kwargs = {**dict_extras, **ext_kwargs}
+
         higher_act_ic = self._prep_action_with_space(higher_action, action_space, m, ic_dev, expects_batch = self.expects_batch) if exists(higher_action) else None
+        prepped_ext = self._prep_ext_kwargs(ext_kwargs, m, ic_dev, self.expects_batch)
 
         was_training = self.interceptor.training
         if self.eval_mode and was_training and not is_passthrough:
@@ -641,7 +824,7 @@ class LatentActionWrapper(EnvWrapper):
         try:
             with torch.no_grad():
                 lower_actions_ic, lengths_t, ic_info, abort_state, closed_loop = self._plan_macro_step(
-                    start_obs, higher_act_ic, m, ic_dev, **kwargs
+                    start_obs, higher_act_ic, m, ic_dev, env_ids = idx, **prepped_ext
                 )
 
             max_steps = int(lengths_t.max().item())
@@ -683,7 +866,8 @@ class LatentActionWrapper(EnvWrapper):
                     with torch.no_grad():
                         self._check_abort(
                             k, active, aborts, cur_obs, lower_actions_ic, lengths_t,
-                            disc_rewards, discount, higher_act_ic, abort_state, ic_dev,
+                            disc_rewards, discount, higher_act_ic, abort_state, ic_dev, idx,
+                            ext_kwargs = prepped_ext, batch_size = m,
                         )
                     if not bool(active.any()):
                         break
@@ -697,7 +881,20 @@ class LatentActionWrapper(EnvWrapper):
                     with torch.no_grad():
                         obs_sub_ic = to_torch_tree(obs_before_sub, ic_dev, float32 = True)
                         h_act_sub = take_batch_indices(higher_act_ic, act_list) if exists(higher_act_ic) else None
-                        step_raw = call_translator(self.interceptor.step_lower, h_act_sub, obs_sub_ic, eval_mode = self.eval_mode, step = k, **kwargs)
+                        sub_ext = self._slice_ext_kwargs(prepped_ext, act_list, m)
+                        step_kw = dict(eval_mode = self.eval_mode, step = k, env_ids = idx[act_list], **sub_ext)
+                        if isinstance(self.interceptor, PolicyInterceptor):
+                            step_kw['_runtime_ctx'] = dict(
+                                last_reward = last_rewards[rows_t].to(ic_dev),
+                                discounted_reward = disc_rewards[rows_t].to(ic_dev),
+                                discount = discount[rows_t].to(ic_dev),
+                            )
+                        step_raw = call_translator(
+                            self.interceptor.step_lower,
+                            h_act_sub,
+                            obs_sub_ic,
+                            **step_kw,
+                        )
                         act_k, opt_done_t, step_ic_info = self._normalize_step_lower(step_raw, n_sub, ic_dev)
                     if k == 0 and step_ic_info and n_sub == m:
                         ic_info.update(step_ic_info)
@@ -773,6 +970,9 @@ class LatentActionWrapper(EnvWrapper):
                     terms[done_local] = step_term_t[step_done_t]
                     truncs[done_local] = step_trunc_t[step_done_t]
 
+                    done_env_ids = idx[act_list][step_done_t.cpu().numpy()].tolist()
+                    self.interceptor.reset_state(done_env_ids)
+
                     if not self._can_step_subset:
                         active.fill_(False)
                         break
@@ -804,12 +1004,13 @@ class LatentActionWrapper(EnvWrapper):
 
         if bool(done_t.any()) and any(exists(f) for f in slot_final_obs):
             if not self.expects_batch and full_step:
-                info['final_observation'] = slot_final_obs[0]
+                info['final_observation'] = self._project_higher_obs(slot_final_obs[0])
                 info['_final_observation'] = True
             else:
                 sample_single = squeeze_single_tree(take_batch_indices(cur_obs, [0]))
                 stacked_f = stack_trees([f if exists(f) else tree_map(zero_leaf, sample_single) for f in slot_final_obs])
-                info['final_observation'] = to_torch_tree(stacked_f, self._obs_device) if self._returns_torch else stacked_f
+                stacked_f = to_torch_tree(stacked_f, self._obs_device) if self._returns_torch else stacked_f
+                info['final_observation'] = self._project_higher_obs(stacked_f)
                 info['_final_observation'] = self._out(done_t, full_step = full_step)
 
         if self._inner_is_latent:
@@ -839,6 +1040,7 @@ class LatentActionWrapper(EnvWrapper):
             info['latent_trace'] = self._build_trace(start_obs, higher_act_ic, trim_sub, info, full_step = full_step)
 
         obs_out = squeeze_single_tree(cur_obs) if (not self.expects_batch and full_step) else cur_obs
+        obs_out = self._project_higher_obs(obs_out)
         return (
             obs_out,
             self._out(out_rewards, full_step = full_step),

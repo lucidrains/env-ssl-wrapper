@@ -119,3 +119,28 @@ class TimeWrapper(TransformObservationWrapper):
             self.times = self.times.masked_fill(done_mask(done, self.num_envs, device = self.times.device), 0)
 
         return out, reward, terminated, truncated, info
+
+    def _format_times(self, times):
+        return self.transform_fn(times) if exists(self.transform_fn) else (times.reshape(-1, 1) if self.vectorized else times)
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+
+        idx = torch.as_tensor([int(i) for i in indices], dtype = torch.long)
+        obs, reward, terminated, truncated, info = normalize_step_out(_step_at_env(self.env, indices, actions))
+        done = dones_of(terminated, truncated)
+
+        self.times = self.times.clone()
+        self.times[idx] += 1
+        sub_times = self.times[idx]
+
+        maybe_transform_final_observation(info, lambda final_obs: self._attach_time(final_obs, self._format_times(sub_times)))
+
+        mask = done_mask(done, len(idx), device = sub_times.device) & self.autoresets
+        live_times = sub_times.masked_fill(mask, 0)
+        out = self._attach_time(obs, self._format_times(live_times))
+
+        if self.autoresets:
+            self.times[idx] = live_times
+
+        return out, reward, terminated, truncated, info

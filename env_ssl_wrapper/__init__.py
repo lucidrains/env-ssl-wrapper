@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = '0.7.1'
+__version__ = '0.7.2'
 
 import sys as _sys
 
@@ -15,6 +15,7 @@ from .latent_action import (
     ActionInterceptorWrapper,
     ActionInterceptor,
     ActionBankInterceptor,
+    PolicyInterceptor,
     Translation,
     StepTranslation,
     LatentStepTrace,
@@ -86,6 +87,7 @@ __all__ = [
     'ActionInterceptorWrapper',
     'ActionInterceptor',
     'ActionBankInterceptor',
+    'PolicyInterceptor',
     'Translation',
     'StepTranslation',
     'LatentStepTrace',

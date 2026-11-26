@@ -111,8 +111,8 @@ class EpisodePaddingWrapper(EnvWrapper):
 
         return obs, info
 
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+    def step(self, action, **kwargs):
+        obs, reward, terminated, truncated, info = self.env.step(action, **kwargs) if kwargs else self.env.step(action)
         raw_obs = obs
 
         if self.is_vector:
@@ -156,4 +156,55 @@ class EpisodePaddingWrapper(EnvWrapper):
                 info['_final_observation'] = back_to_mask_type(dones, done_mask)
 
         self._last_obs = raw_obs
+        return obs, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env, take_batch_indices, write_batch_indices
+        from .helpers import env_num_envs
+
+        obs, reward, terminated, truncated, info = _step_at_env(self.env, indices, actions)
+        raw_obs = obs
+
+        if self.is_vector:
+            idx = np.asarray(indices, dtype = int)
+            info = info if isinstance(info, dict) else {}
+
+            dones = dones_of(terminated, truncated)
+            mask = to_numpy(dones).astype(bool)
+            if mask.ndim > 1:
+                mask = mask.any(axis = tuple(range(1, mask.ndim)))
+
+            n_total = env_num_envs(self.env)
+            if not exists(self._is_done) or len(self._is_done) != n_total:
+                self._is_done = np.zeros(n_total, dtype = bool)
+
+            newly = mask if self.autoreset else mask & ~self._is_done[idx]
+            self._is_done[idx] |= mask
+            done_mask = mask if self.autoreset else self._is_done[idx]
+
+            if done_mask.any():
+                assert exists(self._last_obs), 'environment needs reset before calling step. call env.reset() first'
+
+                if newly.any():
+                    final_val = first_existing(info, 'final_observation', 'final_obs')
+                    value = final_val if exists(final_val) else take_batch_indices(self._last_obs, idx)
+
+                    if not exists(self._final_obs):
+                        self._final_obs = copy_tree(self._last_obs)
+                    self._final_obs = write_batch_indices(
+                        self._final_obs,
+                        idx[newly],
+                        take_batch_indices(value, np.where(newly)[0]),
+                    )
+
+                if not self.autoreset or self.pad_autoreset:
+                    obs = tree_map(partial(zero_mask, mask = done_mask), obs)
+                    reward = zero_mask(reward, done_mask & ~newly, fill_scalar = 0.0)
+
+                info['final_observation'] = take_batch_indices(self._final_obs, idx)
+                info['_final_observation'] = back_to_mask_type(dones, done_mask)
+
+            if exists(self._last_obs):
+                self._last_obs = write_batch_indices(copy_tree(self._last_obs), idx, raw_obs)
+
         return obs, reward, terminated, truncated, info

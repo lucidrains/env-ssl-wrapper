@@ -356,7 +356,32 @@ def mark_terminal_obs(info, obs, dones, is_vector):
         info['final_observation'] = obs
         info['_final_observation'] = True
 
+# SMDP telemetry keys emitted by LatentActionWrapper (always gated on 'duration' in info)
+
+SMDP_FLOAT_INFO_KEYS = ('duration', 'discount', 'raw_reward', 'last_reward')
+SMDP_INT_INFO_KEYS = ('executed_steps', 'planned_steps')
+SMDP_BOOL_INFO_KEYS = ('aborted',)
+SMDP_INFO_KEYS = (*SMDP_FLOAT_INFO_KEYS, *SMDP_INT_INFO_KEYS, *SMDP_BOOL_INFO_KEYS)
+
+def maybe_transform_smdp_info(info, fn):
+    if not isinstance(info, dict) or 'duration' not in info:
+        return info
+
+    for key in SMDP_INFO_KEYS:
+        if key in info:
+            info[key] = fn(info[key])
+
+    if isinstance(info.get('lower_info'), dict):
+        maybe_transform_smdp_info(info['lower_info'], fn)
+
+    return info
+
 def instantiate_env(env):
+    if isinstance(env, (list, tuple)):
+        assert len(env) > 0, 'env sequence must be non-empty'
+        from ..latent_action.helpers import _SubEnvList
+        return _SubEnvList(env)
+
     if isinstance(env, str):
         import gymnasium as gym
         return gym.make(env)

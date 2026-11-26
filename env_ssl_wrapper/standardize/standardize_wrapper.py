@@ -48,9 +48,25 @@ class StandardizeWrapper(EnvWrapper):
     def render(self, height = 64, width = 64, camera = None):
         return self.adapter.render(height = height, width = width, camera = camera)
 
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.adapter.step(action)
+    def step(self, action, **kwargs):
+        if kwargs:
+            from .helpers import normalize_step_out
+            obs, reward, terminated, truncated, info = normalize_step_out(self.env.step(action, **kwargs))
+        else:
+            obs, reward, terminated, truncated, info = self.adapter.step(action)
 
+        info = info if isinstance(info, dict) else {}
+
+        dones = dones_of(terminated, truncated)
+        mark_terminal_obs(info, obs, dones, self.is_vector)
+
+        return obs, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+        from .helpers import normalize_step_out
+
+        obs, reward, terminated, truncated, info = normalize_step_out(_step_at_env(self.env, indices, actions))
         info = info if isinstance(info, dict) else {}
 
         dones = dones_of(terminated, truncated)

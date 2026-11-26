@@ -171,3 +171,44 @@ class MemoryTraceWrapper(TransformObservationWrapper):
 
         out = self.transform_obs(obs, done = done, update_state = True)
         return out, reward, terminated, truncated, info
+
+    def _transform_obs_at(self, obs, idx, done = None, update_state: bool = True):
+        out = self._to_obs_dict(obs)
+
+        for key, val_float in self._iter_targets(out):
+            if key not in self.traces:
+                sub_traces = [val_float.clone() for _ in self.lambdas]
+            else:
+                idx_t = idx.to(val_float.device)
+                sub_traces = []
+                updated_full = []
+                for lam, prev in zip(self.lambdas, self.traces[key]):
+                    prev_dev = prev.to(device = val_float.device, dtype = val_float.dtype)
+                    sub_next = prev_dev[idx_t].lerp(val_float, calc_lerp_weight(lam, done, val_float))
+                    sub_traces.append(sub_next)
+                    if update_state:
+                        nxt_full = prev_dev.clone()
+                        nxt_full[idx_t] = sub_next
+                        updated_full.append(nxt_full)
+                if update_state:
+                    self.traces[key] = updated_full
+
+            for lam, trace in zip(self.lambdas, sub_traces):
+                out[self.trace_key_for(key, lam)] = trace
+
+        return out
+
+    def step_at(self, indices, actions):
+        from .latent_action.helpers import _step_at_env
+
+        idx = torch.as_tensor([int(i) for i in indices], dtype = torch.long)
+        obs, reward, terminated, truncated, info = normalize_step_out(_step_at_env(self.env, indices, actions))
+        done = dones_of(terminated, truncated)
+
+        maybe_transform_final_observation(
+            info,
+            partial(self._transform_obs_at, idx = idx, done = None, update_state = False),
+        )
+
+        out = self._transform_obs_at(obs, idx = idx, done = done, update_state = True)
+        return out, reward, terminated, truncated, info

@@ -18,6 +18,7 @@ from .helpers import (
     is_tensor,
     is_vectorized,
     maybe_transform_final_observation,
+    maybe_transform_smdp_info,
 )
 
 # helper functions
@@ -199,9 +200,9 @@ class AutoBatchedWrapper(EnvWrapper):
         maybe_transform_final_observation(info, maybe_expand_dim)
         return obs, info
 
-    def step(self, action):
+    def step(self, action, **kwargs):
         action = maybe_squeeze_dim(action, shape_tree = self.action_shape_tree, is_vector = self.is_vector, prepend_batch = self.prepend_batch)
-        out = self.env.step(action)
+        out = self.env.step(action, **kwargs) if kwargs else self.env.step(action)
 
         if self.is_vector:
             return out
@@ -209,5 +210,12 @@ class AutoBatchedWrapper(EnvWrapper):
         obs, reward, terminated, truncated, info = out
         obs, reward, terminated, truncated = (maybe_expand_dim(t) for t in (obs, reward, terminated, truncated))
         maybe_transform_final_observation(info, maybe_expand_dim)
+        maybe_transform_smdp_info(info, maybe_expand_dim)
 
         return obs, reward, terminated, truncated, info
+
+    def step_at(self, indices, actions):
+        from ..latent_action.helpers import _step_at_env
+
+        actions = maybe_squeeze_dim(actions, shape_tree = self.action_shape_tree, is_vector = self.is_vector, prepend_batch = self.prepend_batch)
+        return _step_at_env(self.env, indices, actions)
